@@ -158,6 +158,23 @@ export default function DetailModal() {
     }
   }
 
+  const handleCopyInputImage = async () => {
+    const imgId = task.inputImageIds?.[0]
+    const src = imgId ? imageSrcs[imgId] : ''
+    if (!src) return
+    try {
+      const res = await fetch(src)
+      const blob = await res.blob()
+      await navigator.clipboard.write([
+        new ClipboardItem({ [blob.type]: blob }),
+      ])
+      showToast('参考图已复制', 'success')
+    } catch (err) {
+      console.error(err)
+      showToast('复制参考图失败', 'error')
+    }
+  }
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4"
@@ -327,9 +344,20 @@ export default function DetailModal() {
             {/* 参考图 */}
             {task.inputImageIds?.length > 0 && (
               <div className="mb-4">
-                <h3 className="text-xs font-medium text-gray-400 dark:text-gray-500 uppercase tracking-wider mb-2">
-                  参考图
-                </h3>
+                <div className="flex items-center gap-1.5 mb-2">
+                  <h3 className="text-xs font-medium text-gray-400 dark:text-gray-500 uppercase tracking-wider">
+                    参考图
+                  </h3>
+                  <button
+                    onClick={handleCopyInputImage}
+                    className="p-1 rounded text-gray-400 hover:bg-gray-100 dark:text-gray-500 dark:hover:bg-white/[0.06] transition"
+                    title="复制参考图"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                    </svg>
+                  </button>
+                </div>
                 <div className="flex gap-2 flex-wrap">
                   {task.inputImageIds.map((imgId) => (
                     <img
