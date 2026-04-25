@@ -2,7 +2,7 @@
 
 基于 OpenAI `gpt-image-2` 接口的图片生成与编辑工具。提供简洁的 Web UI，支持文本生成图片、参考图编辑、可视化参数调节、历史记录管理与本地数据导入导出。
 
-**在线体验：** [https://cooksleep.github.io/gpt_image_playground/](https://cooksleep.github.io/gpt_image_playground/)
+**Vercel 部署版本在线体验：** [https://gpt-image-playground.cooksleep.dev](https://gpt-image-playground.cooksleep.dev)
 
 ---
 
@@ -60,7 +60,8 @@
 
 支持多种部署与使用方式，推荐使用 Vercel 一键部署。
 
-### ▲ 方式一：Vercel 一键部署 (推荐)
+<details>
+<summary><strong>▲ 方式一：Vercel 一键部署 (推荐)</strong></summary>
 
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FCookSleep%2Fgpt_image_playground&project-name=gpt-image-playground&repository-name=gpt-image-playground)
 
@@ -74,7 +75,17 @@ VITE_DEFAULT_API_URL=https://api.openai.com
 
 部署完成后，打开 Vercel 分配的域名，在页面右上角设置中填入 API Key 即可使用。
 
-### 🐳 方式二：Docker 部署
+**更新说明：**
+
+- 如果你是通过一键按钮部署，Vercel 通常会为你创建一份自己的 Git 仓库，并从该仓库自动部署。
+- 后续想更新到本项目最新版时，请先将你的仓库同步到本仓库最新代码，再让 Vercel 重新部署。
+- 如果你的仓库是 Fork，可以在 GitHub 仓库页面点击 **Sync fork** 同步；同步后，Vercel 会按你的项目设置自动部署。
+- 如果你关闭了 Vercel 自动部署，也可以在 Vercel 项目的 **Deployments** 页面手动 Redeploy 最新提交。
+
+</details>
+
+<details>
+<summary><strong>🐳 方式二：Docker 部署</strong></summary>
 
 项目已将镜像发布至 GitHub Container Registry。你可以通过环境变量 `API_URL` 注入默认的 API 节点。
 
@@ -103,20 +114,21 @@ services:
 
 *(注：官方镜像同时提供带版本号的标签，如 `0.1.11` 或 `0.1`)*
 
-### 🌐 方式三：GitHub Pages 自动部署
+**更新说明：**
 
-本项目内置了 GitHub Actions 工作流。当你将本项目 Fork 到自己的仓库后，只需推送打上 `v*` 标签的代码，即可自动触发部署。
+- 使用 `latest` 标签时，重新拉取镜像并重启容器即可更新到最新发布版本。
+- 如果希望固定版本，建议使用明确版本号标签，例如 `ghcr.io/cooksleep/gpt_image_playground:0.2.3`。
+- Docker Compose 更新示例：
 
-1. 进入你的仓库 **Settings → Pages**。
-2. 将 **Source** 选项改为 **GitHub Actions**。
-3. 推送版本标签：
-   ```bash
-   git tag v0.1.2
-   git push origin v0.1.2
-   ```
-4. 等待 Action 运行完毕，即可访问你的专属 GitHub Pages。
+```bash
+docker compose pull
+docker compose up -d
+```
 
-### 💻 方式四：本地开发与自行构建
+</details>
+
+<details>
+<summary><strong>💻 方式三：本地开发与自行构建</strong></summary>
 
 1. **环境准备 (可选)**
    你可以在项目根目录新建 `.env.local` 文件，配置构建时的默认 API URL：
@@ -136,6 +148,8 @@ services:
    npm run build
    ```
    构建输出的文件会存放在 `dist/` 目录下，你可以将其部署到任何静态文件服务器（如 Nginx、Vercel、Netlify 等）。
+
+</details>
 
 ---
 
