@@ -23,9 +23,10 @@ export default function SettingsModal() {
   }, [showSettings, settings])
 
   const commitSettings = (nextDraft: AppSettings) => {
+    const baseUrl = nextDraft.baseUrl.trim()
     const normalizedDraft = {
       ...nextDraft,
-      baseUrl: normalizeBaseUrl(nextDraft.baseUrl.trim() || DEFAULT_SETTINGS.baseUrl),
+      baseUrl: baseUrl ? normalizeBaseUrl(baseUrl) : '',
       apiKey: nextDraft.apiKey,
       model: nextDraft.model.trim() || DEFAULT_SETTINGS.model,
       timeout: Number(nextDraft.timeout) || DEFAULT_SETTINGS.timeout,
@@ -111,11 +112,11 @@ export default function SettingsModal() {
                   onChange={(e) => setDraft((prev) => ({ ...prev, baseUrl: e.target.value }))}
                   onBlur={(e) => commitSettings({ ...draft, baseUrl: e.target.value })}
                   type="text"
-                  placeholder={DEFAULT_SETTINGS.baseUrl}
+                  placeholder={DEFAULT_SETTINGS.baseUrl || 'same-origin (/v1)'}
                   className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
                 />
                 <div className="mt-1 text-[10px] text-gray-400 dark:text-gray-500">
-                  支持通过查询参数覆盖：<code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">?apiUrl=</code>
+                  留空或填 same-origin 使用当前域名 /v1；支持查询参数覆盖：<code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">?apiUrl=</code>
                 </div>
               </label>
 

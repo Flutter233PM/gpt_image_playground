@@ -1,5 +1,7 @@
 // ===== 设置 =====
 
+import { normalizeBaseUrl } from './lib/devProxy'
+
 export interface AppSettings {
   baseUrl: string
   apiKey: string
@@ -7,7 +9,12 @@ export interface AppSettings {
   timeout: number
 }
 
-const DEFAULT_BASE_URL = import.meta.env.VITE_DEFAULT_API_URL?.trim() || 'https://api.openai.com'
+const configuredDefaultBaseUrl = import.meta.env.VITE_DEFAULT_API_URL?.trim()
+const DEFAULT_BASE_URL = normalizeBaseUrl(
+  configuredDefaultBaseUrl === undefined || configuredDefaultBaseUrl === ''
+    ? 'https://api.openai.com'
+    : configuredDefaultBaseUrl,
+)
 
 export const DEFAULT_SETTINGS: AppSettings = {
   baseUrl: DEFAULT_BASE_URL,

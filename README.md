@@ -80,6 +80,12 @@ https://cooksleep.github.io/gpt_image_playground
 VITE_DEFAULT_API_URL=https://api.openai.com
 ```
 
+如果线上入口已经把 `/v1/*` 反代到接口服务，也可以设置为同源模式：
+
+```bash
+VITE_DEFAULT_API_URL=same-origin
+```
+
 部署完成后，打开 Vercel 分配的域名，在页面右上角设置中填入 API Key 即可使用。
 
 **更新说明：**
@@ -104,6 +110,20 @@ docker run -d -p 8080:80 \
   ghcr.io/cooksleep/gpt_image_playground:latest
 ```
 
+如果接口服务没有开放浏览器跨域，推荐让浏览器只请求当前站点，再由本镜像里的 Nginx 转发 `/v1/*`：
+
+```bash
+docker run -d -p 8080:80 \
+  -e API_PROXY_URL=https://sub2api.flukio.com \
+  ghcr.io/cooksleep/gpt_image_playground:latest
+```
+
+设置 `API_PROXY_URL` 后，默认 API URL 会自动切到 `same-origin`，请求链路为：
+
+```text
+浏览器 -> 当前站点 /v1/images/generations -> Nginx -> API_PROXY_URL/v1/images/generations
+```
+
 **使用 Docker Compose：**
 
 ```yaml
@@ -112,6 +132,19 @@ services:
     image: ghcr.io/cooksleep/gpt_image_playground:latest
     environment:
       - API_URL=https://api.openai.com
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+```
+
+同源代理部署示例：
+
+```yaml
+services:
+  gpt-image-playground:
+    image: ghcr.io/cooksleep/gpt_image_playground:latest
+    environment:
+      - API_PROXY_URL=https://sub2api.flukio.com
     ports:
       - "8080:80"
     restart: unless-stopped
@@ -141,6 +174,11 @@ docker compose up -d
    你可以在项目根目录新建 `.env.local` 文件，配置构建时的默认 API URL：
    ```bash
    VITE_DEFAULT_API_URL=https://api.openai.com
+   ```
+
+   如果本机或线上 Web 服务器会把 `/v1/*` 转发到真实接口，可使用同源模式：
+   ```bash
+   VITE_DEFAULT_API_URL=same-origin
    ```
 
 2. **安装依赖与启动开发服务器**
@@ -192,6 +230,19 @@ docker compose up -d
 
    如果需要在线上部署中使用代理，请使用 Vercel Function、Cloudflare Worker、Nginx 反向代理或自建后端等服务端方案。
 
+   Caddy 同源代理示例：
+   ```caddyfile
+   gimage.flukio.com {
+       handle /v1/* {
+           reverse_proxy https://sub2api.flukio.com {
+               header_up Host sub2api.flukio.com
+           }
+       }
+
+       reverse_proxy 127.0.0.1:9832
+   }
+   ```
+
 4. **构建静态产物**
    ```bash
    npm run build
@@ -207,6 +258,7 @@ docker compose up -d
 点击页面右上角的设置图标，你可以随时更改 API 相关的配置。
 应用支持通过 URL 查询参数快速填充配置，非常适合书签或分享给他人使用：
 - `?apiUrl=https://你的代理地址.com`
+- `?apiUrl=same-origin` 使用当前站点的 `/v1/*` 代理
 - `?apiKey=sk-xxxx`
 
 例如：

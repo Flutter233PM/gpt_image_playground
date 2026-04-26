@@ -6,9 +6,12 @@ export interface DevProxyConfig {
   secure: boolean
 }
 
+const SAME_ORIGIN_ALIASES = new Set(['same-origin', 'self', '.', '/'])
+
 export function normalizeBaseUrl(baseUrl: string): string {
   const trimmed = baseUrl.trim()
   if (!trimmed) return ''
+  if (SAME_ORIGIN_ALIASES.has(trimmed.toLowerCase())) return ''
 
   const input = /^[a-zA-Z][a-zA-Z\d+.-]*:\/\//.test(trimmed)
     ? trimmed

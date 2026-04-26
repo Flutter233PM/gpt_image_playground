@@ -1,7 +1,29 @@
 #!/bin/sh
 
 # 用环境变量替换默认 API URL
-API_URL=${API_URL:-https://api.openai.com}
+if [ "${API_URL+x}" != "x" ]; then
+  if [ -n "${API_PROXY_URL:-}" ]; then
+    API_URL=same-origin
+  else
+    API_URL=https://api.openai.com
+  fi
+fi
+
+if [ -n "${API_PROXY_URL:-}" ]; then
+  API_PROXY_URL=$(printf '%s' "$API_PROXY_URL" | sed 's|/*$||')
+  cat >/etc/nginx/api-proxy-location.conf <<EOF
+    location /v1/ {
+        proxy_pass ${API_PROXY_URL}/v1/;
+        proxy_ssl_server_name on;
+        proxy_set_header Host \$proxy_host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+EOF
+else
+  : >/etc/nginx/api-proxy-location.conf
+fi
 
 # 查找所有 js 文件并将占位符替换为实际的 API_URL
 find /usr/share/nginx/html/assets -type f -name "*.js" -exec sed -i "s|__VITE_DEFAULT_API_URL_PLACEHOLDER__|$API_URL|g" {} +

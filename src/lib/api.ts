@@ -62,8 +62,6 @@ export async function callImageApi(opts: CallApiOptions): Promise<CallApiResult>
   const proxyConfig = readClientDevProxyConfig()
   const requestHeaders = {
     Authorization: `Bearer ${settings.apiKey}`,
-    'Cache-Control': 'no-store, no-cache, max-age=0',
-    Pragma: 'no-cache',
   }
 
   const controller = new AbortController()
