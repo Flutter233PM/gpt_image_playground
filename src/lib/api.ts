@@ -123,6 +123,13 @@ interface ResponsesWebSocketEvent {
 
 const WEBSOCKET_PROTOCOL_TOKEN_RE = /^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/
 const SUB2API_WS_API_KEY_PROTOCOL_PREFIX = 'sub2api-api-key.'
+const RESPONSES_IMAGE_INSTRUCTIONS = [
+  'You are an image generation assistant.',
+  'Follow the latest user request and use prior response context when provided.',
+  'Use the image_generation tool whenever the request asks for image generation or image editing.',
+  'Use any attached images as visual references unless the user gives different instructions.',
+  'Keep text responses concise and focused on useful generation details.',
+].join(' ')
 
 async function readErrorMessage(response: Response): Promise<string> {
   let errorMsg = `HTTP ${response.status}`
@@ -185,6 +192,7 @@ function buildResponsesImagePayload(opts: CallResponsesImageApiOptions): Respons
 
   const body: Record<string, unknown> = {
     model: model.trim(),
+    instructions: RESPONSES_IMAGE_INSTRUCTIONS,
     input: [
       {
         role: 'user',
