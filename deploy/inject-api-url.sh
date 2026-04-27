@@ -11,10 +11,18 @@ fi
 
 if [ -n "${API_PROXY_URL:-}" ]; then
   API_PROXY_URL=$(printf '%s' "$API_PROXY_URL" | sed 's|/*$||')
+  API_PROXY_TIMEOUT=${API_PROXY_TIMEOUT:-600s}
+  API_PROXY_CONNECT_TIMEOUT=${API_PROXY_CONNECT_TIMEOUT:-60s}
+  API_PROXY_MAX_BODY_SIZE=${API_PROXY_MAX_BODY_SIZE:-256m}
   cat >/etc/nginx/api-proxy-location.conf <<EOF
     location /v1/ {
+        client_max_body_size ${API_PROXY_MAX_BODY_SIZE};
         proxy_pass ${API_PROXY_URL}/v1/;
         proxy_ssl_server_name on;
+        proxy_connect_timeout ${API_PROXY_CONNECT_TIMEOUT};
+        proxy_send_timeout ${API_PROXY_TIMEOUT};
+        proxy_read_timeout ${API_PROXY_TIMEOUT};
+        send_timeout ${API_PROXY_TIMEOUT};
         proxy_set_header Host \$proxy_host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
