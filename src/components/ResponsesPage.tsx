@@ -330,6 +330,7 @@ export default function ResponsesPage() {
   const messageListRef = useRef<HTMLDivElement>(null)
   const activeConversationIdRef = useRef('')
   const conversationsRef = useRef<StoredResponseConversation[]>([])
+  const runningConversationIdsRef = useRef<Set<string>>(new Set())
   const settings = useStore((s) => s.settings)
   const setShowSettings = useStore((s) => s.setShowSettings)
   const showToast = useStore((s) => s.showToast)
@@ -345,8 +346,7 @@ export default function ResponsesPage() {
   const [conversations, setConversations] = useState<StoredResponseConversation[]>([])
   const [activeConversationId, setActiveConversationId] = useState('')
   const [contextMode, setContextMode] = useState<ResponsesContextMode>('auto')
-  const [isRunning, setIsRunning] = useState(false)
-  const [runningConversationId, setRunningConversationId] = useState('')
+  const [runningConversationIds, setRunningConversationIds] = useState<Set<string>>(() => new Set())
   const [showSizePicker, setShowSizePicker] = useState(false)
 
   const canUseCompression = toolOptions.output_format !== 'png'
@@ -362,11 +362,15 @@ export default function ResponsesPage() {
     contextMode === 'previous_response_id'
     || (contextMode === 'auto' && Boolean(conversationResponseId))
   )
-  const isActiveConversationRunning = isRunning && runningConversationId === activeConversationId
+  const runningConversationCount = runningConversationIds.size
+  const isRunning = runningConversationCount > 0
+  const isActiveConversationRunning = activeConversationId
+    ? runningConversationIds.has(activeConversationId)
+    : false
 
   const statusText = useMemo(() => {
     if (isActiveConversationRunning) return '请求中'
-    if (isRunning) return '后台生成中'
+    if (runningConversationCount > 0) return `${runningConversationCount} 个后台生成中`
     if (shouldSendPreviousResponseId && conversationResponseId) return '响应 ID 接续'
     if (shouldSendImageContext) return hasLatestImageContext ? '图片上下文接续' : '无可用图片上下文'
     if (conversationResponseId) return '未发送上下文'
@@ -375,7 +379,7 @@ export default function ResponsesPage() {
     conversationResponseId,
     hasLatestImageContext,
     isActiveConversationRunning,
-    isRunning,
+    runningConversationCount,
     shouldSendImageContext,
     shouldSendPreviousResponseId,
   ])
@@ -403,6 +407,30 @@ export default function ResponsesPage() {
   useEffect(() => {
     conversationsRef.current = conversations
   }, [conversations])
+
+  useEffect(() => {
+    runningConversationIdsRef.current = runningConversationIds
+  }, [runningConversationIds])
+
+  const markConversationRunning = (conversationId: string) => {
+    setRunningConversationIds((current) => {
+      const next = new Set(current)
+      next.add(conversationId)
+      runningConversationIdsRef.current = next
+      return next
+    })
+  }
+
+  const markConversationSettled = (conversationId: string) => {
+    setRunningConversationIds((current) => {
+      if (!current.has(conversationId)) return current
+
+      const next = new Set(current)
+      next.delete(conversationId)
+      runningConversationIdsRef.current = next
+      return next
+    })
+  }
 
   useEffect(() => {
     let active = true
@@ -575,6 +603,12 @@ export default function ResponsesPage() {
 
     const startedAt = Date.now()
     const conversationId = activeConversationId || genId()
+
+    if (runningConversationIdsRef.current.has(conversationId)) {
+      showToast('这条会话正在生成，完成后再发送下一条', 'error')
+      return
+    }
+
     const userMessage: StoredResponseChatMessage = {
       id: genId(),
       role: 'user',
@@ -608,8 +642,7 @@ export default function ResponsesPage() {
     setMessages(nextMessages)
     setPrompt('')
     setReferenceImages([])
-    setIsRunning(true)
-    setRunningConversationId(conversationId)
+    markConversationRunning(conversationId)
     persistConversation(conversationId, nextMessages, previousResponseId, trimmedPrompt)
     scrollToBottom()
 
@@ -766,9 +799,10 @@ export default function ResponsesPage() {
       persistConversation(conversationId, failedMessages, previousResponseId, trimmedPrompt, { activate: false })
       showToast(`生成失败：${getResponsesErrorDisplay(message).summary}`, 'error')
     } finally {
-      setIsRunning(false)
-      setRunningConversationId('')
-      scrollToBottom()
+      markConversationSettled(conversationId)
+      if (activeConversationIdRef.current === conversationId) {
+        scrollToBottom()
+      }
     }
   }
 
@@ -793,7 +827,7 @@ export default function ResponsesPage() {
 
   const handleDeleteConversation = (event: React.MouseEvent, conversationId: string) => {
     event.stopPropagation()
-    if (conversationId === runningConversationId) {
+    if (runningConversationIdsRef.current.has(conversationId)) {
       showToast('这条会话正在生成，完成后再删除', 'error')
       return
     }
@@ -849,7 +883,7 @@ export default function ResponsesPage() {
             ) : (
               <div className="space-y-1">
                 {conversations.map((conversation) => {
-                  const isConversationRunning = conversation.id === runningConversationId
+                  const isConversationRunning = runningConversationIds.has(conversation.id)
 
                   return (
                     <button
@@ -1114,7 +1148,7 @@ export default function ResponsesPage() {
                 onKeyDown={(event) => {
                   if (event.key === 'Enter' && !event.shiftKey) {
                     event.preventDefault()
-                    if (!isRunning) handleSubmit()
+                    if (!isActiveConversationRunning) handleSubmit()
                   }
                 }}
                 rows={2}
@@ -1124,10 +1158,10 @@ export default function ResponsesPage() {
               <button
                 type="button"
                 onClick={handleSubmit}
-                disabled={isRunning}
+                disabled={isActiveConversationRunning}
                 className="mb-0.5 inline-flex h-10 cursor-pointer items-center justify-center rounded-lg bg-blue-600 px-4 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-400 dark:bg-blue-500 dark:hover:bg-blue-400 dark:disabled:bg-blue-500/50"
               >
-                {isActiveConversationRunning ? '发送中' : isRunning ? '后台生成中' : '发送'}
+                {isActiveConversationRunning ? '发送中' : '发送'}
               </button>
             </div>
           </div>
