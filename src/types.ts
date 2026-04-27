@@ -36,13 +36,22 @@ export interface TaskParams {
   n: number
 }
 
+export const IMAGE_COUNT_MIN = 1
+export const IMAGE_COUNT_MAX = 4
+
 export const DEFAULT_PARAMS: TaskParams = {
   size: 'auto',
   quality: 'auto',
   output_format: 'png',
   output_compression: null,
   moderation: 'auto',
-  n: 1,
+  n: IMAGE_COUNT_MIN,
+}
+
+export function normalizeImageCount(value: unknown, fallback = DEFAULT_PARAMS.n): number {
+  const parsed = typeof value === 'number' ? value : Number(value)
+  const base = Number.isFinite(parsed) ? parsed : fallback
+  return Math.min(IMAGE_COUNT_MAX, Math.max(IMAGE_COUNT_MIN, Math.trunc(base)))
 }
 
 // ===== 输入图片（UI 层面） =====

@@ -8,7 +8,7 @@ import type {
   TaskRecord,
   ExportData,
 } from './types'
-import { DEFAULT_SETTINGS, DEFAULT_PARAMS } from './types'
+import { DEFAULT_SETTINGS, DEFAULT_PARAMS, normalizeImageCount } from './types'
 import {
   getAllTasks,
   putTask,
@@ -234,9 +234,13 @@ export async function submitTask() {
   const normalizedParams = {
     ...params,
     size: normalizeImageSize(params.size) || DEFAULT_PARAMS.size,
+    n: normalizeImageCount(params.n),
   }
-  if (normalizedParams.size !== params.size) {
-    useStore.getState().setParams({ size: normalizedParams.size })
+  if (normalizedParams.size !== params.size || normalizedParams.n !== params.n) {
+    useStore.getState().setParams({
+      size: normalizedParams.size,
+      n: normalizedParams.n,
+    })
   }
 
   const taskId = genId()

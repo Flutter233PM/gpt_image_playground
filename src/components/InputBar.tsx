@@ -1,6 +1,6 @@
 import { useRef, useEffect, useCallback, useState } from 'react'
 import { useStore, submitTask, addImageFromFile } from '../store'
-import { DEFAULT_PARAMS } from '../types'
+import { DEFAULT_PARAMS, IMAGE_COUNT_MAX, IMAGE_COUNT_MIN, normalizeImageCount } from '../types'
 import { normalizeImageSize } from '../lib/size'
 import Select from './Select'
 import SizePickerModal from './SizePickerModal'
@@ -95,12 +95,18 @@ export default function InputBar() {
   }, [outputCompressionInput, params.output_compression, setParams])
 
   const commitN = useCallback(() => {
-    const nextValue = Number(nInput)
     const normalizedValue =
-      nInput.trim() === '' ? DEFAULT_PARAMS.n : Number.isNaN(nextValue) ? params.n : nextValue
+      nInput.trim() === '' ? DEFAULT_PARAMS.n : normalizeImageCount(nInput, params.n)
     setNInput(String(normalizedValue))
     setParams({ n: normalizedValue })
   }, [nInput, params.n, setParams])
+
+  const handleNChange = useCallback((value: string) => {
+    setNInput(value)
+    setParams({
+      n: value.trim() === '' ? DEFAULT_PARAMS.n : normalizeImageCount(value, params.n),
+    })
+  }, [params.n, setParams])
 
   const handleFiles = async (files: FileList | File[]) => {
     try {
@@ -416,11 +422,11 @@ export default function InputBar() {
         <span className="text-gray-400 dark:text-gray-500 ml-1">数量</span>
         <input
           value={nInput}
-          onChange={(e) => setNInput(e.target.value)}
+          onChange={(e) => handleNChange(e.target.value)}
           onBlur={commitN}
           type="number"
-          min={1}
-          max={4}
+          min={IMAGE_COUNT_MIN}
+          max={IMAGE_COUNT_MAX}
           className="px-3 py-1.5 rounded-xl border border-gray-200/60 dark:border-white/[0.08] bg-white/50 dark:bg-white/[0.03] focus:outline-none text-xs transition-all duration-200 shadow-sm"
         />
       </label>

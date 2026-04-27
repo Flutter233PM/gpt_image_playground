@@ -9,6 +9,7 @@ import type {
   ResponsesReasoningEffort,
   TaskParams,
 } from '../types'
+import { normalizeImageCount } from '../types'
 import { buildApiUrl, readClientDevProxyConfig } from './devProxy'
 
 const MIME_MAP: Record<string, string> = {
@@ -408,6 +409,7 @@ export async function callImageApi(opts: CallApiOptions): Promise<CallApiResult>
   const { settings, prompt, params, inputImageDataUrls } = opts
   const isEdit = inputImageDataUrls.length > 0
   const mime = MIME_MAP[params.output_format] || 'image/png'
+  const imageCount = normalizeImageCount(params.n)
   const proxyConfig = readClientDevProxyConfig()
   const requestHeaders = {
     Authorization: `Bearer ${settings.apiKey}`,
@@ -427,6 +429,9 @@ export async function callImageApi(opts: CallApiOptions): Promise<CallApiResult>
       formData.append('quality', params.quality)
       formData.append('output_format', params.output_format)
       formData.append('moderation', params.moderation)
+      if (imageCount > 1) {
+        formData.append('n', String(imageCount))
+      }
 
       if (params.output_format !== 'png' && params.output_compression != null) {
         formData.append('output_compression', String(params.output_compression))
@@ -460,8 +465,8 @@ export async function callImageApi(opts: CallApiOptions): Promise<CallApiResult>
       if (params.output_format !== 'png' && params.output_compression != null) {
         body.output_compression = params.output_compression
       }
-      if (params.n > 1) {
-        body.n = params.n
+      if (imageCount > 1) {
+        body.n = imageCount
       }
 
       response = await fetch(buildApiUrl(settings.baseUrl, 'images/generations', proxyConfig), {
