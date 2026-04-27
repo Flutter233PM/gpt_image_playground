@@ -422,8 +422,8 @@ export async function callResponsesImageApiWebSocket(
   const { body, mime } = buildResponsesImagePayload(opts)
   const wsPayload = {
     type: 'response.create',
-    stream: false,
     ...body,
+    stream: true,
   }
 
   return new Promise((resolve, reject) => {
