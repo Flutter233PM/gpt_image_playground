@@ -243,26 +243,35 @@ export async function submitTask() {
     })
   }
 
-  const taskId = genId()
-  const task: TaskRecord = {
-    id: taskId,
-    prompt: prompt.trim(),
-    params: normalizedParams,
-    inputImageIds: inputImages.map((i) => i.id),
+  const taskCount = normalizedParams.n
+  const taskPrompt = prompt.trim()
+  const inputImageIds = inputImages.map((i) => i.id)
+  const createdAt = Date.now()
+  const taskParams = {
+    ...normalizedParams,
+    n: 1,
+  }
+  const newBatch: TaskRecord[] = Array.from({ length: taskCount }, (_, index) => ({
+    id: genId(),
+    prompt: taskPrompt,
+    params: taskParams,
+    inputImageIds,
     outputImages: [],
     status: 'running',
     error: null,
-    createdAt: Date.now(),
+    createdAt: createdAt + index,
     finishedAt: null,
     elapsed: null,
-  }
+  }))
 
-  const newTasks = [task, ...tasks]
+  const newTasks = [...newBatch, ...tasks]
   setTasks(newTasks)
-  await putTask(task)
+  await Promise.all(newBatch.map((task) => putTask(task)))
 
   // 异步调用 API
-  executeTask(taskId)
+  for (const task of newBatch) {
+    executeTask(task.id)
+  }
 }
 
 async function executeTask(taskId: string) {
