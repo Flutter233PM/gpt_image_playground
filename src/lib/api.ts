@@ -161,6 +161,37 @@ async function readErrorMessage(response: Response): Promise<string> {
   return errorMsg
 }
 
+async function readImageApiImages(response: Response, mime: string, signal: AbortSignal): Promise<string[]> {
+  if (!response.ok) {
+    throw new Error(await readErrorMessage(response))
+  }
+
+  const payload = await response.json() as ImageApiResponse
+  const data = payload.data
+  if (!Array.isArray(data) || !data.length) {
+    throw new Error('接口未返回图片数据')
+  }
+
+  const images: string[] = []
+  for (const item of data) {
+    const b64 = item.b64_json
+    if (b64) {
+      images.push(normalizeBase64Image(b64, mime))
+      continue
+    }
+
+    if (isHttpUrl(item.url)) {
+      images.push(await fetchImageUrlAsDataUrl(item.url, mime, signal))
+    }
+  }
+
+  if (!images.length) {
+    throw new Error('接口未返回可用图片数据')
+  }
+
+  return images
+}
+
 function buildWebSocketApiUrl(baseUrl: string, path: string, proxyConfig?: ReturnType<typeof readClientDevProxyConfig>): string {
   const apiUrl = buildApiUrl(baseUrl, path, proxyConfig)
   const url = new URL(apiUrl, window.location.href)
@@ -419,96 +450,73 @@ export async function callImageApi(opts: CallApiOptions): Promise<CallApiResult>
   const timeoutId = setTimeout(() => controller.abort(), settings.timeout * 1000)
 
   try {
-    let response: Response
-
-    if (isEdit) {
-      const formData = new FormData()
-      formData.append('model', settings.model)
-      formData.append('prompt', prompt)
-      formData.append('size', params.size)
-      formData.append('quality', params.quality)
-      formData.append('output_format', params.output_format)
-      formData.append('moderation', params.moderation)
-      if (imageCount > 1) {
-        formData.append('n', String(imageCount))
-      }
-
-      if (params.output_format !== 'png' && params.output_compression != null) {
-        formData.append('output_compression', String(params.output_compression))
-      }
-
-      for (let i = 0; i < inputImageDataUrls.length; i++) {
-        const dataUrl = inputImageDataUrls[i]
-        const resp = await fetch(dataUrl)
-        const blob = await resp.blob()
-        const ext = blob.type.split('/')[1] || 'png'
-        formData.append('image[]', blob, `input-${i + 1}.${ext}`)
-      }
-
-      response = await fetch(buildApiUrl(settings.baseUrl, 'images/edits', proxyConfig), {
-        method: 'POST',
-        headers: requestHeaders,
-        cache: 'no-store',
-        body: formData,
-        signal: controller.signal,
-      })
-    } else {
-      const body: Record<string, unknown> = {
-        model: settings.model,
-        prompt,
-        size: params.size,
-        quality: params.quality,
-        output_format: params.output_format,
-        moderation: params.moderation,
-      }
-
-      if (params.output_format !== 'png' && params.output_compression != null) {
-        body.output_compression = params.output_compression
-      }
-      if (imageCount > 1) {
-        body.n = imageCount
-      }
-
-      response = await fetch(buildApiUrl(settings.baseUrl, 'images/generations', proxyConfig), {
-        method: 'POST',
-        headers: {
-          ...requestHeaders,
-          'Content-Type': 'application/json',
-        },
-        cache: 'no-store',
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      })
-    }
-
-    if (!response.ok) {
-      throw new Error(await readErrorMessage(response))
-    }
-
-    const payload = await response.json() as ImageApiResponse
-    const data = payload.data
-    if (!Array.isArray(data) || !data.length) {
-      throw new Error('接口未返回图片数据')
-    }
-
     const images: string[] = []
-    for (const item of data) {
-      const b64 = item.b64_json
-      if (b64) {
-        images.push(normalizeBase64Image(b64, mime))
-        continue
+
+    for (let index = 0; index < imageCount; index++) {
+      let response: Response
+
+      if (isEdit) {
+        const formData = new FormData()
+        formData.append('model', settings.model)
+        formData.append('prompt', prompt)
+        formData.append('size', params.size)
+        formData.append('quality', params.quality)
+        formData.append('output_format', params.output_format)
+        formData.append('moderation', params.moderation)
+
+        if (params.output_format !== 'png' && params.output_compression != null) {
+          formData.append('output_compression', String(params.output_compression))
+        }
+
+        for (let i = 0; i < inputImageDataUrls.length; i++) {
+          const dataUrl = inputImageDataUrls[i]
+          const resp = await fetch(dataUrl)
+          const blob = await resp.blob()
+          const ext = blob.type.split('/')[1] || 'png'
+          formData.append('image[]', blob, `input-${i + 1}.${ext}`)
+        }
+
+        response = await fetch(buildApiUrl(settings.baseUrl, 'images/edits', proxyConfig), {
+          method: 'POST',
+          headers: requestHeaders,
+          cache: 'no-store',
+          body: formData,
+          signal: controller.signal,
+        })
+      } else {
+        const body: Record<string, unknown> = {
+          model: settings.model,
+          prompt,
+          size: params.size,
+          quality: params.quality,
+          output_format: params.output_format,
+          moderation: params.moderation,
+        }
+
+        if (params.output_format !== 'png' && params.output_compression != null) {
+          body.output_compression = params.output_compression
+        }
+
+        response = await fetch(buildApiUrl(settings.baseUrl, 'images/generations', proxyConfig), {
+          method: 'POST',
+          headers: {
+            ...requestHeaders,
+            'Content-Type': 'application/json',
+          },
+          cache: 'no-store',
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        })
       }
 
-      if (isHttpUrl(item.url)) {
-        images.push(await fetchImageUrlAsDataUrl(item.url, mime, controller.signal))
-      }
+      images.push(...await readImageApiImages(response, mime, controller.signal))
     }
 
     if (!images.length) {
       throw new Error('接口未返回可用图片数据')
     }
 
-    return { images }
+    return { images: images.slice(0, imageCount) }
   } finally {
     clearTimeout(timeoutId)
   }
