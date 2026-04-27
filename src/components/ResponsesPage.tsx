@@ -8,7 +8,7 @@ import type {
   TaskRecord,
 } from '../types'
 import { DEFAULT_PARAMS } from '../types'
-import { callResponsesImageApiWebSocket } from '../lib/api'
+import { callResponsesImageApi, callResponsesImageApiWebSocket } from '../lib/api'
 import type { CallResponsesImageApiResult } from '../lib/api'
 import {
   deleteResponseConversation,
@@ -78,6 +78,10 @@ function isContinuationUnavailableError(message: string): boolean {
     normalized.includes('upstream continuation connection is unavailable')
     || normalized.includes('please restart the conversation')
   )
+}
+
+function isWebSocketAbnormalCloseError(message: string): boolean {
+  return message.includes('1006') || message.toLowerCase().includes('websocket 异常断开')
 }
 
 function genId(): string {
@@ -422,6 +426,7 @@ export default function ResponsesPage() {
     try {
       let usedPreviousResponseId = previousResponseId
       let retriedWithoutContext = false
+      let retriedWithHttp = false
       let result: CallResponsesImageApiResult
 
       try {
@@ -437,22 +442,33 @@ export default function ResponsesPage() {
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         const canRetryWithoutContext = toolOptions.action !== 'edit' || inputImages.length > 0
-        if (!previousResponseId || !isContinuationUnavailableError(message) || !canRetryWithoutContext) {
+        if (isWebSocketAbnormalCloseError(message)) {
+          retriedWithHttp = true
+          result = await callResponsesImageApi({
+            settings,
+            model: trimmedModel,
+            prompt: trimmedPrompt,
+            previousResponseId,
+            reasoningEffort,
+            toolOptions,
+            inputImageDataUrls: inputImages.map((image) => image.dataUrl),
+          })
+        } else if (!previousResponseId || !isContinuationUnavailableError(message) || !canRetryWithoutContext) {
           throw err
+        } else {
+          usedPreviousResponseId = ''
+          retriedWithoutContext = true
+          setContextMode('off')
+          result = await callResponsesImageApiWebSocket({
+            settings,
+            model: trimmedModel,
+            prompt: trimmedPrompt,
+            previousResponseId: '',
+            reasoningEffort,
+            toolOptions,
+            inputImageDataUrls: inputImages.map((image) => image.dataUrl),
+          })
         }
-
-        usedPreviousResponseId = ''
-        retriedWithoutContext = true
-        setContextMode('off')
-        result = await callResponsesImageApiWebSocket({
-          settings,
-          model: trimmedModel,
-          prompt: trimmedPrompt,
-          previousResponseId: '',
-          reasoningEffort,
-          toolOptions,
-          inputImageDataUrls: inputImages.map((image) => image.dataUrl),
-        })
       }
 
       const nextResponseId = result.responseId ?? ''
@@ -508,6 +524,8 @@ export default function ResponsesPage() {
       showToast(
         result.images.length > 0
           ? `Responses API 返回 ${result.images.length} 张图片${syncedToImageApi ? '，已同步到 Image API' : imageApiSyncFailed ? '，同步到 Image API 失败' : ''}`
+          : retriedWithHttp
+            ? 'WebSocket 断开，已用 HTTP Responses 重试完成'
           : retriedWithoutContext
             ? '接续连接不可用，已按新对话完成'
           : 'Responses API 返回文本内容',
