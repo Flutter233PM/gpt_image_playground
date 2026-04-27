@@ -19,11 +19,15 @@ if [ -n "${API_PROXY_URL:-}" ]; then
         client_max_body_size ${API_PROXY_MAX_BODY_SIZE};
         set \$proxy_authorization \$http_authorization;
         set \$proxy_connection "";
+        set \$proxy_origin \$http_origin;
+        set \$proxy_ws_protocol "";
         if (\$http_sec_websocket_protocol ~* "(^|,)[[:space:]]*sub2api-api-key\\.([^,[:space:]]+)") {
             set \$proxy_authorization "Bearer \$2";
         }
         if (\$http_upgrade != "") {
             set \$proxy_connection "upgrade";
+            set \$proxy_origin "${API_PROXY_URL}";
+            set \$proxy_ws_protocol "sub2api.responses.v2";
         }
         proxy_pass ${API_PROXY_URL}/v1/;
         proxy_http_version 1.1;
@@ -35,8 +39,10 @@ if [ -n "${API_PROXY_URL:-}" ]; then
         proxy_set_header Host \$proxy_host;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection \$proxy_connection;
+        proxy_set_header Origin \$proxy_origin;
         proxy_set_header Authorization \$proxy_authorization;
-        proxy_set_header Sec-WebSocket-Protocol \$http_sec_websocket_protocol;
+        proxy_set_header Sec-WebSocket-Protocol "";
+        add_header Sec-WebSocket-Protocol \$proxy_ws_protocol always;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
