@@ -5,12 +5,17 @@ import type {
   StoredResponseChatMessage,
   StoredResponseConversation,
   StoredResponseReferenceImage,
+  TaskRecord,
 } from '../types'
+import { DEFAULT_PARAMS } from '../types'
 import { callResponsesImageApiWebSocket } from '../lib/api'
+import type { CallResponsesImageApiResult } from '../lib/api'
 import {
   deleteResponseConversation,
   getAllResponseConversations,
+  putTask,
   putResponseConversation,
+  storeImage,
 } from '../lib/db'
 import { normalizeImageSize } from '../lib/size'
 import { useStore } from '../store'
@@ -66,6 +71,14 @@ const CONTEXT_MODE_OPTIONS = [
   { label: '不发送上下文', value: 'off' },
   { label: 'WS v2 接续', value: 'previous_response_id' },
 ]
+
+function isContinuationUnavailableError(message: string): boolean {
+  const normalized = message.toLowerCase()
+  return (
+    normalized.includes('upstream continuation connection is unavailable')
+    || normalized.includes('please restart the conversation')
+  )
+}
 
 function genId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
@@ -156,12 +169,56 @@ function sortConversations(conversations: StoredResponseConversation[]): StoredR
   return [...conversations].sort((a, b) => b.updatedAt - a.updatedAt)
 }
 
+async function createImageApiTaskFromResponsesResult(
+  prompt: string,
+  inputImages: StoredResponseReferenceImage[],
+  toolOptions: ResponsesImageToolOptions,
+  outputImages: Array<{ image: string }>,
+  startedAt: number,
+): Promise<TaskRecord | null> {
+  if (!outputImages.length) return null
+
+  const inputImageIds: string[] = []
+  for (const image of inputImages) {
+    inputImageIds.push(await storeImage(image.dataUrl, 'upload'))
+  }
+
+  const outputImageIds: string[] = []
+  for (const image of outputImages) {
+    outputImageIds.push(await storeImage(image.image, 'generated'))
+  }
+
+  return {
+    id: genId(),
+    prompt,
+    params: {
+      ...DEFAULT_PARAMS,
+      size: normalizeImageSize(toolOptions.size) || DEFAULT_PARAMS.size,
+      quality: toolOptions.quality,
+      output_format: toolOptions.output_format,
+      output_compression: toolOptions.output_format === 'png'
+        ? null
+        : toolOptions.output_compression,
+      moderation: toolOptions.moderation,
+      n: Math.max(outputImageIds.length, 1),
+    },
+    inputImageIds,
+    outputImages: outputImageIds,
+    status: 'done',
+    error: null,
+    createdAt: startedAt,
+    finishedAt: Date.now(),
+    elapsed: Date.now() - startedAt,
+  }
+}
+
 export default function ResponsesPage() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const messageListRef = useRef<HTMLDivElement>(null)
   const settings = useStore((s) => s.settings)
   const setShowSettings = useStore((s) => s.setShowSettings)
   const showToast = useStore((s) => s.showToast)
+  const setTasks = useStore((s) => s.setTasks)
 
   const [model, setModel] = useState('gpt-5.5')
   const [prompt, setPrompt] = useState('')
@@ -172,7 +229,7 @@ export default function ResponsesPage() {
   const [conversationResponseId, setConversationResponseId] = useState('')
   const [conversations, setConversations] = useState<StoredResponseConversation[]>([])
   const [activeConversationId, setActiveConversationId] = useState('')
-  const [contextMode, setContextMode] = useState<'off' | 'previous_response_id'>('previous_response_id')
+  const [contextMode, setContextMode] = useState<'off' | 'previous_response_id'>('off')
   const [isRunning, setIsRunning] = useState(false)
   const [showSizePicker, setShowSizePicker] = useState(false)
 
@@ -363,15 +420,40 @@ export default function ResponsesPage() {
     scrollToBottom()
 
     try {
-      const result = await callResponsesImageApiWebSocket({
-        settings,
-        model: trimmedModel,
-        prompt: trimmedPrompt,
-        previousResponseId,
-        reasoningEffort,
-        toolOptions,
-        inputImageDataUrls: inputImages.map((image) => image.dataUrl),
-      })
+      let usedPreviousResponseId = previousResponseId
+      let retriedWithoutContext = false
+      let result: CallResponsesImageApiResult
+
+      try {
+        result = await callResponsesImageApiWebSocket({
+          settings,
+          model: trimmedModel,
+          prompt: trimmedPrompt,
+          previousResponseId,
+          reasoningEffort,
+          toolOptions,
+          inputImageDataUrls: inputImages.map((image) => image.dataUrl),
+        })
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        const canRetryWithoutContext = toolOptions.action !== 'edit' || inputImages.length > 0
+        if (!previousResponseId || !isContinuationUnavailableError(message) || !canRetryWithoutContext) {
+          throw err
+        }
+
+        usedPreviousResponseId = ''
+        retriedWithoutContext = true
+        setContextMode('off')
+        result = await callResponsesImageApiWebSocket({
+          settings,
+          model: trimmedModel,
+          prompt: trimmedPrompt,
+          previousResponseId: '',
+          reasoningEffort,
+          toolOptions,
+          inputImageDataUrls: inputImages.map((image) => image.dataUrl),
+        })
+      }
 
       const nextResponseId = result.responseId ?? ''
       const revisedPrompts = result.images
@@ -381,6 +463,7 @@ export default function ResponsesPage() {
         message.id === assistantId
           ? {
               ...message,
+              previousResponseId: usedPreviousResponseId,
               outputs: result.images,
               texts: result.texts,
               revisedPrompts,
@@ -388,17 +471,47 @@ export default function ResponsesPage() {
               status: 'done' as const,
               elapsed: Date.now() - startedAt,
             }
+          : message.id === userMessage.id
+            ? {
+                ...message,
+                previousResponseId: usedPreviousResponseId,
+              }
           : message
       ))
 
       setMessages(completedMessages)
       if (nextResponseId) setConversationResponseId(nextResponseId)
       persistConversation(conversationId, completedMessages, nextResponseId, trimmedPrompt)
+
+      let syncedToImageApi = false
+      let imageApiSyncFailed = false
+      if (result.images.length > 0) {
+        try {
+          const imageApiTask = await createImageApiTaskFromResponsesResult(
+            trimmedPrompt,
+            inputImages,
+            toolOptions,
+            result.images,
+            startedAt,
+          )
+          if (!imageApiTask) throw new Error('没有可同步的图片')
+          await putTask(imageApiTask)
+          const currentTasks = useStore.getState().tasks
+          setTasks([imageApiTask, ...currentTasks.filter((item) => item.id !== imageApiTask.id)])
+          syncedToImageApi = true
+        } catch (err) {
+          imageApiSyncFailed = true
+          console.error('Sync Responses result to Image API failed', err)
+        }
+      }
+
       showToast(
         result.images.length > 0
-          ? `Responses API 返回 ${result.images.length} 张图片`
+          ? `Responses API 返回 ${result.images.length} 张图片${syncedToImageApi ? '，已同步到 Image API' : imageApiSyncFailed ? '，同步到 Image API 失败' : ''}`
+          : retriedWithoutContext
+            ? '接续连接不可用，已按新对话完成'
           : 'Responses API 返回文本内容',
-        'success',
+        imageApiSyncFailed ? 'error' : 'success',
       )
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
