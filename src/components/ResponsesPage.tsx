@@ -79,6 +79,10 @@ interface ResponsesErrorDisplay {
   requestId?: string
 }
 
+interface PersistConversationOptions {
+  activate?: boolean
+}
+
 function isContinuationUnavailableError(message: string): boolean {
   const normalized = message.toLowerCase()
   return (
@@ -247,6 +251,8 @@ async function createImageApiTaskFromResponsesResult(
 export default function ResponsesPage() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const messageListRef = useRef<HTMLDivElement>(null)
+  const activeConversationIdRef = useRef('')
+  const conversationsRef = useRef<StoredResponseConversation[]>([])
   const settings = useStore((s) => s.settings)
   const setShowSettings = useStore((s) => s.setShowSettings)
   const showToast = useStore((s) => s.showToast)
@@ -263,19 +269,30 @@ export default function ResponsesPage() {
   const [activeConversationId, setActiveConversationId] = useState('')
   const [contextMode, setContextMode] = useState<'off' | 'previous_response_id'>('off')
   const [isRunning, setIsRunning] = useState(false)
+  const [runningConversationId, setRunningConversationId] = useState('')
   const [showSizePicker, setShowSizePicker] = useState(false)
 
   const canUseCompression = toolOptions.output_format !== 'png'
   const compressionValue = toolOptions.output_compression ?? 80
   const currentSize = normalizeImageSize(toolOptions.size) || 'auto'
   const shouldSendPreviousResponseId = contextMode === 'previous_response_id'
+  const isActiveConversationRunning = isRunning && runningConversationId === activeConversationId
 
   const statusText = useMemo(() => {
-    if (isRunning) return '请求中'
+    if (isActiveConversationRunning) return '请求中'
+    if (isRunning) return '后台生成中'
     if (shouldSendPreviousResponseId && conversationResponseId) return 'WS v2 接续'
     if (conversationResponseId) return '未发送上下文'
     return 'WS v2 新对话'
-  }, [conversationResponseId, isRunning, shouldSendPreviousResponseId])
+  }, [conversationResponseId, isActiveConversationRunning, isRunning, shouldSendPreviousResponseId])
+
+  useEffect(() => {
+    activeConversationIdRef.current = activeConversationId
+  }, [activeConversationId])
+
+  useEffect(() => {
+    conversationsRef.current = conversations
+  }, [conversations])
 
   useEffect(() => {
     let active = true
@@ -294,10 +311,12 @@ export default function ResponsesPage() {
           })
           return normalized
         }))
+        conversationsRef.current = loaded
         setConversations(loaded)
 
         const latest = loaded[0]
         if (latest) {
+          activeConversationIdRef.current = latest.id
           setActiveConversationId(latest.id)
           setMessages(latest.messages)
           setConversationResponseId(latest.responseId)
@@ -330,9 +349,12 @@ export default function ResponsesPage() {
     nextMessages: StoredResponseChatMessage[],
     responseId: string,
     titleSeed?: string,
+    options: PersistConversationOptions = {},
   ) => {
+    const activate = options.activate ?? true
     const now = Date.now()
-    const existing = conversations.find((item) => item.id === conversationId)
+    const currentConversations = conversationsRef.current
+    const existing = currentConversations.find((item) => item.id === conversationId)
     const record: StoredResponseConversation = {
       id: conversationId,
       title: existing?.title || deriveConversationTitle(nextMessages, titleSeed),
@@ -341,12 +363,20 @@ export default function ResponsesPage() {
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
     }
-
-    setActiveConversationId(conversationId)
-    setConversations((current) => sortConversations([
+    const nextConversations = sortConversations([
       record,
-      ...current.filter((item) => item.id !== conversationId),
-    ]))
+      ...currentConversations.filter((item) => item.id !== conversationId),
+    ])
+
+    conversationsRef.current = nextConversations
+    setConversations(nextConversations)
+
+    if (activate || activeConversationIdRef.current === conversationId) {
+      activeConversationIdRef.current = conversationId
+      setActiveConversationId(conversationId)
+      setMessages(nextMessages)
+      setConversationResponseId(responseId)
+    }
 
     putResponseConversation(record).catch((err) => {
       showToast(`历史会话保存失败：${err instanceof Error ? err.message : String(err)}`, 'error')
@@ -457,6 +487,7 @@ export default function ResponsesPage() {
     setPrompt('')
     setReferenceImages([])
     setIsRunning(true)
+    setRunningConversationId(conversationId)
     persistConversation(conversationId, nextMessages, previousResponseId, trimmedPrompt)
     scrollToBottom()
 
@@ -532,9 +563,7 @@ export default function ResponsesPage() {
           : message
       ))
 
-      setMessages(completedMessages)
-      if (nextResponseId) setConversationResponseId(nextResponseId)
-      persistConversation(conversationId, completedMessages, nextResponseId, trimmedPrompt)
+      persistConversation(conversationId, completedMessages, nextResponseId, trimmedPrompt, { activate: false })
 
       let syncedToImageApi = false
       let imageApiSyncFailed = false
@@ -580,17 +609,17 @@ export default function ResponsesPage() {
             }
           : item
       ))
-      setMessages(failedMessages)
-      persistConversation(conversationId, failedMessages, previousResponseId, trimmedPrompt)
+      persistConversation(conversationId, failedMessages, previousResponseId, trimmedPrompt, { activate: false })
       showToast(`生成失败：${getResponsesErrorDisplay(message).summary}`, 'error')
     } finally {
       setIsRunning(false)
+      setRunningConversationId('')
       scrollToBottom()
     }
   }
 
   const handleNewConversation = () => {
-    if (isRunning) return
+    activeConversationIdRef.current = ''
     setActiveConversationId('')
     setMessages([])
     setConversationResponseId('')
@@ -599,10 +628,7 @@ export default function ResponsesPage() {
   }
 
   const handleSelectConversation = (conversation: StoredResponseConversation) => {
-    if (isRunning) {
-      showToast('当前请求完成后再切换会话', 'error')
-      return
-    }
+    activeConversationIdRef.current = conversation.id
     setActiveConversationId(conversation.id)
     setMessages(conversation.messages)
     setConversationResponseId(conversation.responseId)
@@ -613,9 +639,13 @@ export default function ResponsesPage() {
 
   const handleDeleteConversation = (event: React.MouseEvent, conversationId: string) => {
     event.stopPropagation()
-    if (isRunning) return
+    if (conversationId === runningConversationId) {
+      showToast('这条会话正在生成，完成后再删除', 'error')
+      return
+    }
 
     const remaining = conversations.filter((item) => item.id !== conversationId)
+    conversationsRef.current = remaining
     setConversations(remaining)
     deleteResponseConversation(conversationId).catch((err) => {
       showToast(`历史会话删除失败：${err instanceof Error ? err.message : String(err)}`, 'error')
@@ -625,6 +655,7 @@ export default function ResponsesPage() {
 
     const next = remaining[0]
     if (next) {
+      activeConversationIdRef.current = next.id
       setActiveConversationId(next.id)
       setMessages(next.messages)
       setConversationResponseId(next.responseId)
@@ -650,7 +681,6 @@ export default function ResponsesPage() {
             <button
               type="button"
               onClick={handleNewConversation}
-              disabled={isRunning}
               className="rounded-lg border border-gray-200 px-2 py-1 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/[0.08] dark:text-gray-300 dark:hover:bg-white/[0.06]"
             >
               新建
@@ -664,43 +694,50 @@ export default function ResponsesPage() {
               </div>
             ) : (
               <div className="space-y-1">
-                {conversations.map((conversation) => (
-                  <button
-                    key={conversation.id}
-                    type="button"
-                    onClick={() => handleSelectConversation(conversation)}
-                    className={`group w-full rounded-lg border px-2 py-2 text-left transition-colors ${
-                      activeConversationId === conversation.id
-                        ? 'border-blue-200 bg-blue-50 dark:border-blue-500/30 dark:bg-blue-500/10'
-                        : 'border-transparent hover:bg-gray-50 dark:hover:bg-white/[0.06]'
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <div className="truncate text-sm font-medium text-gray-800 dark:text-gray-100">
-                          {conversation.title}
+                {conversations.map((conversation) => {
+                  const isConversationRunning = conversation.id === runningConversationId
+
+                  return (
+                    <button
+                      key={conversation.id}
+                      type="button"
+                      onClick={() => handleSelectConversation(conversation)}
+                      className={`group w-full rounded-lg border px-2 py-2 text-left transition-colors ${
+                        activeConversationId === conversation.id
+                          ? 'border-blue-200 bg-blue-50 dark:border-blue-500/30 dark:bg-blue-500/10'
+                          : 'border-transparent hover:bg-gray-50 dark:hover:bg-white/[0.06]'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="truncate text-sm font-medium text-gray-800 dark:text-gray-100">
+                            {conversation.title}
+                          </div>
+                          <div className="mt-1 flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+                            <span>{formatConversationTime(conversation.updatedAt)}</span>
+                            {isConversationRunning && (
+                              <span className="font-medium text-blue-600 dark:text-blue-300">生成中</span>
+                            )}
+                          </div>
                         </div>
-                        <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                          {formatConversationTime(conversation.updatedAt)}
-                        </div>
+                        <span
+                          role="button"
+                          tabIndex={0}
+                          onClick={(event) => handleDeleteConversation(event, conversation.id)}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter' || event.key === ' ') {
+                              handleDeleteConversation(event as unknown as React.MouseEvent, conversation.id)
+                            }
+                          }}
+                          className="rounded px-1 text-xs text-gray-400 opacity-0 transition-colors hover:bg-red-50 hover:text-red-500 group-hover:opacity-100 dark:hover:bg-red-500/10"
+                          title={isConversationRunning ? '生成中，暂不能删除' : '删除会话'}
+                        >
+                          删除
+                        </span>
                       </div>
-                      <span
-                        role="button"
-                        tabIndex={0}
-                        onClick={(event) => handleDeleteConversation(event, conversation.id)}
-                        onKeyDown={(event) => {
-                          if (event.key === 'Enter' || event.key === ' ') {
-                            handleDeleteConversation(event as unknown as React.MouseEvent, conversation.id)
-                          }
-                        }}
-                        className="rounded px-1 text-xs text-gray-400 opacity-0 transition-colors hover:bg-red-50 hover:text-red-500 group-hover:opacity-100 dark:hover:bg-red-500/10"
-                        title="删除会话"
-                      >
-                        删除
-                      </span>
-                    </div>
-                  </button>
-                ))}
+                    </button>
+                  )
+                })}
               </div>
             )}
           </div>
@@ -936,7 +973,7 @@ export default function ResponsesPage() {
                 disabled={isRunning}
                 className="mb-0.5 inline-flex h-10 cursor-pointer items-center justify-center rounded-lg bg-blue-600 px-4 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-400 dark:bg-blue-500 dark:hover:bg-blue-400 dark:disabled:bg-blue-500/50"
               >
-                {isRunning ? '发送中' : '发送'}
+                {isActiveConversationRunning ? '发送中' : isRunning ? '后台生成中' : '发送'}
               </button>
             </div>
           </div>

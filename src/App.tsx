@@ -49,11 +49,7 @@ export default function App() {
   return (
     <>
       <Header />
-      {activeView === 'responses-api' ? (
-        <main className="max-w-7xl mx-auto px-4 pb-12">
-          <ResponsesPage />
-        </main>
-      ) : (
+      {activeView === 'image-api' && (
         <>
           <main className="max-w-7xl mx-auto px-4 pb-48">
             <SearchBar />
@@ -64,6 +60,9 @@ export default function App() {
           <Lightbox />
         </>
       )}
+      <main className={`max-w-7xl mx-auto px-4 pb-12 ${activeView === 'responses-api' ? '' : 'hidden'}`}>
+        <ResponsesPage />
+      </main>
       <SettingsModal />
       <ConfirmDialog />
       <Toast />
