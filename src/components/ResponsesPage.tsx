@@ -17,6 +17,7 @@ import {
   putResponseConversation,
   storeImage,
 } from '../lib/db'
+import { copyTextToClipboard, getClipboardFailureMessage } from '../lib/clipboard'
 import { normalizeImageSize } from '../lib/size'
 import { useStore } from '../store'
 import Select from './Select'
@@ -72,6 +73,12 @@ const CONTEXT_MODE_OPTIONS = [
   { label: 'WS v2 接续', value: 'previous_response_id' },
 ]
 
+interface ResponsesErrorDisplay {
+  summary: string
+  detail?: string
+  requestId?: string
+}
+
 function isContinuationUnavailableError(message: string): boolean {
   const normalized = message.toLowerCase()
   return (
@@ -82,6 +89,27 @@ function isContinuationUnavailableError(message: string): boolean {
 
 function isWebSocketAbnormalCloseError(message: string): boolean {
   return message.includes('1006') || message.toLowerCase().includes('websocket 异常断开')
+}
+
+function extractOpenAIRequestId(message: string): string {
+  return message.match(/request id\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i)?.[1] ?? ''
+}
+
+function getResponsesErrorDisplay(message: string): ResponsesErrorDisplay {
+  const requestId = extractOpenAIRequestId(message)
+  const normalized = message.toLowerCase()
+  const isGenericOpenAIError = normalized.includes('an error occurred while processing your request')
+    && normalized.includes('help.openai.com')
+
+  if (isGenericOpenAIError && requestId) {
+    return {
+      summary: '上游 OpenAI 返回通用失败，请用 request ID 在 sub2api 日志中定位具体原因。',
+      detail: message,
+      requestId,
+    }
+  }
+
+  return { summary: message, requestId }
 }
 
 function genId(): string {
@@ -360,6 +388,15 @@ export default function ResponsesPage() {
     await addReferenceImages(imageFiles, 'paste')
   }
 
+  const handleCopyResponseError = async (text: string, successMessage: string) => {
+    try {
+      await copyTextToClipboard(text)
+      showToast(successMessage, 'success')
+    } catch (err) {
+      showToast(getClipboardFailureMessage('复制失败', err), 'error')
+    }
+  }
+
   const handleSubmit = async () => {
     const trimmedPrompt = prompt.trim()
     const trimmedModel = model.trim()
@@ -545,7 +582,7 @@ export default function ResponsesPage() {
       ))
       setMessages(failedMessages)
       persistConversation(conversationId, failedMessages, previousResponseId, trimmedPrompt)
-      showToast(`生成失败：${message}`, 'error')
+      showToast(`生成失败：${getResponsesErrorDisplay(message).summary}`, 'error')
     } finally {
       setIsRunning(false)
       scrollToBottom()
@@ -772,11 +809,61 @@ export default function ResponsesPage() {
                       </details>
                     )}
 
-                    {message.error && (
-                      <div className="mt-2 rounded-lg border border-red-200 bg-red-50 px-2 py-1.5 text-sm text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-300">
-                        {message.error}
-                      </div>
-                    )}
+                    {message.error && (() => {
+                      const error = getResponsesErrorDisplay(message.error)
+
+                      return (
+                        <div className="mt-2 rounded-lg border border-red-200 bg-red-50 px-2 py-1.5 text-sm text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-300">
+                          <div className="flex items-start justify-between gap-2">
+                            <p className="min-w-0 leading-6">{error.summary}</p>
+                            <button
+                              type="button"
+                              onClick={() => handleCopyResponseError(message.error || '', '完整报错已复制')}
+                              className="inline-flex h-7 w-7 flex-shrink-0 cursor-pointer items-center justify-center rounded-lg border border-red-200 bg-white text-red-600 transition-colors hover:bg-red-50 dark:border-red-500/30 dark:bg-white/[0.04] dark:text-red-300 dark:hover:bg-red-500/10"
+                              aria-label="复制完整报错"
+                              title="复制完整报错"
+                            >
+                              <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+                                <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
+                                <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+                              </svg>
+                            </button>
+                          </div>
+
+                          {error.requestId && (
+                            <div className="mt-2 flex items-center gap-2 rounded-lg border border-red-200/70 bg-white/70 px-2 py-1 text-xs dark:border-red-500/20 dark:bg-white/[0.03]">
+                              <span className="flex-shrink-0 text-red-500 dark:text-red-300">request ID</span>
+                              <span className="min-w-0 flex-1 break-all font-mono text-red-700 dark:text-red-200">
+                                {error.requestId}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => handleCopyResponseError(error.requestId || '', 'request ID 已复制')}
+                                className="inline-flex h-6 w-6 flex-shrink-0 cursor-pointer items-center justify-center rounded border border-red-200 bg-white text-red-600 transition-colors hover:bg-red-50 dark:border-red-500/30 dark:bg-white/[0.04] dark:text-red-300 dark:hover:bg-red-500/10"
+                                aria-label="复制 request ID"
+                                title="复制 request ID"
+                              >
+                                <svg className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+                                  <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
+                                  <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+                                </svg>
+                              </button>
+                            </div>
+                          )}
+
+                          {error.detail && (
+                            <details className="mt-2">
+                              <summary className="cursor-pointer text-xs text-red-600 transition-colors hover:text-red-700 dark:text-red-300 dark:hover:text-red-200">
+                                原始错误
+                              </summary>
+                              <p className="mt-1 whitespace-pre-wrap break-words text-xs leading-5 text-red-600 dark:text-red-300">
+                                {error.detail}
+                              </p>
+                            </details>
+                          )}
+                        </div>
+                      )
+                    })()}
 
                     {message.responseId && (
                       <div className="mt-2 truncate font-mono text-[11px] text-gray-400 dark:text-gray-500">
