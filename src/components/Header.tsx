@@ -1,11 +1,9 @@
 import { useStore } from '../store'
-import { useVersionCheck } from '../hooks/useVersionCheck'
 
 export default function Header() {
   const activeView = useStore((s) => s.activeView)
   const setActiveView = useStore((s) => s.setActiveView)
   const setShowSettings = useStore((s) => s.setShowSettings)
-  const { hasUpdate, latestRelease, dismiss } = useVersionCheck()
   const viewButtonClass = (view: typeof activeView) =>
     `rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
       activeView === view
@@ -65,19 +63,6 @@ export default function Header() {
               Resp
             </button>
           </nav>
-          {/* 新版本提示 */}
-          {hasUpdate && latestRelease && (
-            <a
-              href={latestRelease.url}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={dismiss}
-              className="px-2 py-1 rounded-lg text-[11px] font-semibold bg-red-500 text-white hover:bg-red-600 transition-colors animate-fade-in"
-              title={`新版本 ${latestRelease.tag}`}
-            >
-              New
-            </a>
-          )}
           <button
             onClick={() => setShowSettings(true)}
             className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-900 transition-colors"

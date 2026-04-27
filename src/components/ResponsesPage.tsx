@@ -62,6 +62,11 @@ const REASONING_OPTIONS = [
   { label: 'xhigh', value: 'xhigh' },
 ]
 
+const CONTEXT_MODE_OPTIONS = [
+  { label: '兼容模式', value: 'off' },
+  { label: '接续 response.id', value: 'previous_response_id' },
+]
+
 function genId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
 }
@@ -123,6 +128,10 @@ function sortConversations(conversations: StoredResponseConversation[]): StoredR
   return [...conversations].sort((a, b) => b.updatedAt - a.updatedAt)
 }
 
+function isPreviousResponseUnsupported(message: string): boolean {
+  return /previous_response_id/i.test(message) && /WebSocket v2/i.test(message)
+}
+
 export default function ResponsesPage() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const messageListRef = useRef<HTMLDivElement>(null)
@@ -139,19 +148,21 @@ export default function ResponsesPage() {
   const [conversationResponseId, setConversationResponseId] = useState('')
   const [conversations, setConversations] = useState<StoredResponseConversation[]>([])
   const [activeConversationId, setActiveConversationId] = useState('')
+  const [contextMode, setContextMode] = useState<'off' | 'previous_response_id'>('off')
   const [isRunning, setIsRunning] = useState(false)
   const [showSizePicker, setShowSizePicker] = useState(false)
 
   const canUseCompression = toolOptions.output_format !== 'png'
   const compressionValue = toolOptions.output_compression ?? 80
   const currentSize = normalizeImageSize(toolOptions.size) || 'auto'
-  const hasConversation = messages.length > 0 || Boolean(conversationResponseId)
+  const shouldSendPreviousResponseId = contextMode === 'previous_response_id'
 
   const statusText = useMemo(() => {
     if (isRunning) return '请求中'
-    if (conversationResponseId) return '已接续'
+    if (shouldSendPreviousResponseId && conversationResponseId) return '已接续'
+    if (conversationResponseId) return '兼容模式'
     return '新对话'
-  }, [conversationResponseId, isRunning])
+  }, [conversationResponseId, isRunning, shouldSendPreviousResponseId])
 
   useEffect(() => {
     let active = true
@@ -279,13 +290,14 @@ export default function ResponsesPage() {
       return
     }
 
-    if (toolOptions.action === 'edit' && !inputImages.length && !conversationResponseId) {
+    const previousResponseId = shouldSendPreviousResponseId ? conversationResponseId : ''
+
+    if (toolOptions.action === 'edit' && !inputImages.length && !previousResponseId) {
       showToast('编辑模式需要参考图或已有对话上下文', 'error')
       return
     }
 
     const startedAt = Date.now()
-    const previousResponseId = conversationResponseId
     const conversationId = activeConversationId || genId()
     const userMessage: StoredResponseChatMessage = {
       id: genId(),
@@ -360,6 +372,10 @@ export default function ResponsesPage() {
       )
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
+      if (isPreviousResponseUnsupported(message)) {
+        setContextMode('off')
+        showToast('当前后端不支持 previous_response_id，已切换到兼容模式', 'error')
+      }
       const failedMessages = nextMessages.map((item) => (
         item.id === assistantId
           ? {
@@ -503,7 +519,7 @@ export default function ResponsesPage() {
                 Responses 对话生图
               </h2>
               <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
-                自动接续上一次 response.id，粘贴或上传图片作为本轮参考图。
+                兼容模式默认不发送 previous_response_id，可手动切换为接续模式。
               </p>
             </div>
             <span className="hidden rounded-lg border border-gray-200 px-2 py-1 text-xs text-gray-500 dark:border-white/[0.08] dark:text-gray-400 sm:inline">
@@ -686,7 +702,7 @@ export default function ResponsesPage() {
           <div>
             <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">请求参数</h3>
             <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              当前对话会自动带上上一轮 response.id。
+              兼容模式适合当前 sub2api HTTP Responses 代理。
             </p>
           </div>
 
@@ -706,6 +722,16 @@ export default function ResponsesPage() {
               value={reasoningEffort}
               onChange={(value) => setReasoningEffort(value)}
               options={REASONING_OPTIONS}
+              className="rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-sm text-gray-900 transition hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500/20 dark:border-white/[0.08] dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-white/[0.06]"
+            />
+          </label>
+
+          <label className="block">
+            <span className="mb-1.5 block text-xs font-medium text-gray-600 dark:text-gray-300">上下文</span>
+            <Select
+              value={contextMode}
+              onChange={(value) => setContextMode(value)}
+              options={CONTEXT_MODE_OPTIONS}
               className="rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-sm text-gray-900 transition hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500/20 dark:border-white/[0.08] dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-white/[0.06]"
             />
           </label>
@@ -788,7 +814,7 @@ export default function ResponsesPage() {
           <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 dark:border-white/[0.08] dark:bg-gray-950">
             <div className="text-xs font-medium text-gray-600 dark:text-gray-300">当前上下文</div>
             <div className="mt-1 break-all font-mono text-[11px] text-gray-500 dark:text-gray-400">
-              {conversationResponseId || '无'}
+              {shouldSendPreviousResponseId ? conversationResponseId || '无' : '未发送'}
             </div>
           </div>
         </aside>
