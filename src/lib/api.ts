@@ -5,6 +5,7 @@ import type {
   ResponsesContextItemRef,
   ResponsesImageOutput,
   ResponsesImageToolOptions,
+  ResponsesReasoningContextItemRef,
   ResponsesReasoningEffort,
   TaskParams,
 } from '../types'
@@ -84,6 +85,7 @@ export interface CallResponsesImageApiResult {
 interface ResponsesApiContentItem {
   type?: string
   text?: string
+  [key: string]: unknown
 }
 
 interface ResponsesApiOutputItem {
@@ -92,6 +94,9 @@ interface ResponsesApiOutputItem {
   result?: string
   revised_prompt?: string
   content?: ResponsesApiContentItem[]
+  summary?: Array<Record<string, unknown>>
+  encrypted_content?: string
+  status?: string
 }
 
 interface ResponsesApiResponse {
@@ -105,7 +110,7 @@ interface ResponsesImagePayloadBuildResult {
 }
 
 interface ResponsesOutputParseState {
-  latestReasoningId?: string
+  latestReasoning?: ResponsesReasoningContextItemRef
 }
 
 interface ResponsesWebSocketEvent {
@@ -130,6 +135,7 @@ interface ResponsesWebSocketEvent {
 const WEBSOCKET_PROTOCOL_TOKEN_RE = /^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/
 const SUB2API_WS_API_KEY_PROTOCOL_PREFIX = 'sub2api-api-key.'
 const RESPONSES_WS_ABNORMAL_CLOSE_CODE = 1006
+const RESPONSES_IMAGE_INCLUDE = ['reasoning.encrypted_content']
 const RESPONSES_IMAGE_INSTRUCTIONS = [
   'You are an image generation assistant.',
   'Follow the latest user request and use prior response context when provided.',
@@ -172,15 +178,65 @@ function buildSub2ApiWebSocketProtocols(apiKey: string): string[] {
   return ['sub2api.responses.v2', authProtocol]
 }
 
+function normalizeRecordArray(value: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(value)) return []
+
+  return value.filter((item): item is Record<string, unknown> => (
+    typeof item === 'object' && item !== null && !Array.isArray(item)
+  ))
+}
+
+function normalizeReasoningContextItem(item: ResponsesApiOutputItem | ResponsesContextItemRef): ResponsesReasoningContextItemRef | null {
+  if (item.type !== 'reasoning') return null
+
+  const id = item.id?.trim()
+  if (!id) return null
+
+  const ref: ResponsesReasoningContextItemRef = {
+    type: 'reasoning',
+    id,
+    summary: normalizeRecordArray(item.summary),
+  }
+
+  if (typeof item.encrypted_content === 'string' && item.encrypted_content.trim()) {
+    ref.encrypted_content = item.encrypted_content
+  }
+
+  const content = normalizeRecordArray(item.content)
+  if (content.length) {
+    ref.content = content
+  }
+
+  if (typeof item.status === 'string' && item.status.trim()) {
+    ref.status = item.status
+  }
+
+  return ref
+}
+
 function normalizeResponsesContextItemRefs(contextItemRefs: ResponsesContextItemRef[] | undefined): ResponsesContextItemRef[] {
   const refs: ResponsesContextItemRef[] = []
   const seen = new Set<string>()
 
   for (const item of contextItemRefs ?? []) {
     const type = item.type
-    const id = item.id.trim()
 
-    if ((type !== 'reasoning' && type !== 'image_generation_call') || !id) continue
+    if (type === 'reasoning') {
+      const reasoning = normalizeReasoningContextItem(item)
+      if (!reasoning) continue
+
+      const key = `${reasoning.type}:${reasoning.id}`
+      if (seen.has(key)) continue
+
+      seen.add(key)
+      refs.push(reasoning)
+      continue
+    }
+
+    if (type !== 'image_generation_call') continue
+
+    const id = item.id.trim()
+    if (!id) continue
 
     const key = `${type}:${id}`
     if (seen.has(key)) continue
@@ -190,6 +246,24 @@ function normalizeResponsesContextItemRefs(contextItemRefs: ResponsesContextItem
   }
 
   return refs
+}
+
+function buildResponsesContextInputItem(item: ResponsesContextItemRef): Record<string, unknown> {
+  if (item.type === 'reasoning') {
+    const inputItem: Record<string, unknown> = {
+      type: 'reasoning',
+      id: item.id,
+      summary: item.summary ?? [],
+    }
+
+    if (item.encrypted_content) inputItem.encrypted_content = item.encrypted_content
+    if (item.content?.length) inputItem.content = item.content
+    if (item.status) inputItem.status = item.status
+
+    return inputItem
+  }
+
+  return { type: 'image_generation_call', id: item.id }
 }
 
 function buildResponsesImagePayload(opts: CallResponsesImageApiOptions): ResponsesImagePayloadBuildResult {
@@ -226,7 +300,7 @@ function buildResponsesImagePayload(opts: CallResponsesImageApiOptions): Respons
   }
 
   const input: Array<Record<string, unknown>> = normalizeResponsesContextItemRefs(contextItemRefs)
-    .map((item) => ({ type: item.type, id: item.id }))
+    .map(buildResponsesContextInputItem)
   input.push({
     role: 'user',
     content,
@@ -236,6 +310,7 @@ function buildResponsesImagePayload(opts: CallResponsesImageApiOptions): Respons
     model: model.trim(),
     instructions: RESPONSES_IMAGE_INSTRUCTIONS,
     input,
+    include: RESPONSES_IMAGE_INCLUDE,
     tools: [tool],
   }
 
@@ -274,8 +349,8 @@ function collectResponsesOutputItem(
   state?: ResponsesOutputParseState,
 ) {
   if (item.type === 'reasoning') {
-    const reasoningId = item.id?.trim()
-    if (reasoningId && state) state.latestReasoningId = reasoningId
+    const reasoning = normalizeReasoningContextItem(item)
+    if (reasoning && state) state.latestReasoning = reasoning
     return
   }
 
@@ -287,8 +362,9 @@ function collectResponsesOutputItem(
     ))
 
     if (existing) {
-      if (!existing.reasoningId && state?.latestReasoningId) {
-        existing.reasoningId = state.latestReasoningId
+      if (!existing.reasoning && state?.latestReasoning) {
+        existing.reasoning = state.latestReasoning
+        existing.reasoningId = state.latestReasoning.id
       }
       if (!existing.revisedPrompt && item.revised_prompt) {
         existing.revisedPrompt = item.revised_prompt
@@ -298,7 +374,8 @@ function collectResponsesOutputItem(
         image: imageData,
         revisedPrompt: item.revised_prompt,
         callId,
-        reasoningId: state?.latestReasoningId,
+        reasoningId: state?.latestReasoning?.id,
+        reasoning: state?.latestReasoning,
       })
     }
     return

@@ -221,7 +221,11 @@ function uniqueContextItemRefs(items: ResponsesContextItemRef[]): ResponsesConte
     if (seen.has(key)) continue
 
     seen.add(key)
-    refs.push({ type: item.type, id })
+    if (item.type === 'reasoning') {
+      refs.push({ ...item, id })
+    } else {
+      refs.push({ type: 'image_generation_call', id })
+    }
   }
 
   return refs
@@ -242,13 +246,13 @@ function getLatestImageContextItemRefs(messages: StoredResponseChatMessage[]): R
     const refs: ResponsesContextItemRef[] = []
 
     for (const item of messages[i].outputs) {
-      const reasoningId = item.reasoningId?.trim()
+      const reasoning = item.reasoning
       const callId = item.callId?.trim()
 
-      if (!reasoningId || !callId) continue
+      if (!reasoning?.id?.trim() || !callId) continue
 
       refs.push(
-        { type: 'reasoning', id: reasoningId },
+        reasoning,
         { type: 'image_generation_call', id: callId },
       )
     }
@@ -333,19 +337,19 @@ export default function ResponsesPage() {
   const hasLatestImageContext = latestImageContextItemRefs.length > 0
   const shouldSendImageContext = (
     contextMode === 'image_generation_call'
-    || (contextMode === 'auto' && hasLatestImageContext)
+    || (contextMode === 'auto' && !conversationResponseId && hasLatestImageContext)
   )
   const shouldSendPreviousResponseId = (
     contextMode === 'previous_response_id'
-    || (contextMode === 'auto' && !hasLatestImageContext)
+    || (contextMode === 'auto' && Boolean(conversationResponseId))
   )
   const isActiveConversationRunning = isRunning && runningConversationId === activeConversationId
 
   const statusText = useMemo(() => {
     if (isActiveConversationRunning) return '请求中'
     if (isRunning) return '后台生成中'
-    if (shouldSendImageContext) return hasLatestImageContext ? '图片上下文接续' : '无可用图片上下文'
     if (shouldSendPreviousResponseId && conversationResponseId) return '响应 ID 接续'
+    if (shouldSendImageContext) return hasLatestImageContext ? '图片上下文接续' : '无可用图片上下文'
     if (conversationResponseId) return '未发送上下文'
     return 'WS v2 新对话'
   }, [
@@ -357,12 +361,12 @@ export default function ResponsesPage() {
     shouldSendPreviousResponseId,
   ])
   const contextPreviewText = useMemo(() => {
+    if (shouldSendPreviousResponseId) {
+      return conversationResponseId || '下一条从新对话开始'
+    }
     if (shouldSendImageContext) {
       return latestImageContextItemRefs.map(formatContextItemRef).join('\n')
         || '暂无 reasoning + image_generation_call 配对，下一条从新对话开始'
-    }
-    if (shouldSendPreviousResponseId) {
-      return conversationResponseId || '下一条从新对话开始'
     }
 
     return '本次不发送'
@@ -625,7 +629,7 @@ export default function ResponsesPage() {
             toolOptions,
             inputImageDataUrls: inputImages.map((image) => image.dataUrl),
           })
-        } else if (!previousResponseId || !isContinuationUnavailableError(message) || !canRetryWithoutContext) {
+        } else if (!previousResponseId || !isContinuationUnavailableError(message)) {
           throw err
         } else if (fallbackImageContextItemRefs.length) {
           usedPreviousResponseId = ''
@@ -643,6 +647,8 @@ export default function ResponsesPage() {
             toolOptions,
             inputImageDataUrls: inputImages.map((image) => image.dataUrl),
           })
+        } else if (!canRetryWithoutContext) {
+          throw err
         } else {
           usedPreviousResponseId = ''
           usedContextItemRefs = []
@@ -1112,7 +1118,7 @@ export default function ResponsesPage() {
           <div>
             <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">请求参数</h3>
             <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              自动混合优先发送 reasoning + image_generation_call，缺少配对时再用响应 ID。
+              自动混合优先使用响应 ID，响应接续不可用时回退到图片上下文。
             </p>
           </div>
 

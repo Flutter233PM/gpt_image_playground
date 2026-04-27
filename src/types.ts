@@ -113,13 +113,23 @@ export interface ImageApiResponse {
 
 export type ResponsesImageAction = 'auto' | 'generate' | 'edit'
 export type ResponsesContextMode = 'off' | 'auto' | 'previous_response_id' | 'image_generation_call'
-export type ResponsesContextItemType = 'reasoning' | 'image_generation_call'
 export type ResponsesReasoningEffort = 'default' | 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
 
-export interface ResponsesContextItemRef {
-  type: ResponsesContextItemType
+export interface ResponsesReasoningContextItemRef {
+  type: 'reasoning'
+  id: string
+  summary: Array<Record<string, unknown>>
+  encrypted_content?: string
+  content?: Array<Record<string, unknown>>
+  status?: string
+}
+
+export interface ResponsesImageGenerationContextItemRef {
+  type: 'image_generation_call'
   id: string
 }
+
+export type ResponsesContextItemRef = ResponsesReasoningContextItemRef | ResponsesImageGenerationContextItemRef
 
 export interface ResponsesImageToolOptions {
   action: ResponsesImageAction
@@ -135,6 +145,7 @@ export interface ResponsesImageOutput {
   revisedPrompt?: string
   callId?: string
   reasoningId?: string
+  reasoning?: ResponsesReasoningContextItemRef
 }
 
 export interface ResponsesApiTextOutput {
