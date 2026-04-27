@@ -263,6 +263,25 @@ function getLatestImageContextItemRefs(messages: StoredResponseChatMessage[]): R
   return []
 }
 
+function buildContinuationFallbackPrompt(messages: StoredResponseChatMessage[], currentPrompt: string): string {
+  const priorUserMessages = messages
+    .filter((message) => message.role === 'user' && message.text.trim())
+    .slice(-6)
+    .map((message, index) => `${index + 1}. ${message.text.trim()}`)
+
+  if (!priorUserMessages.length) return currentPrompt
+
+  return [
+    'Continue the same image-generation conversation.',
+    'Use the prior user requests as context for the current request.',
+    '',
+    'Prior user requests:',
+    ...priorUserMessages,
+    '',
+    `Current request: ${currentPrompt || 'continue from the prior request'}`,
+  ].join('\n')
+}
+
 async function createImageApiTaskFromResponsesResult(
   prompt: string,
   inputImages: StoredResponseReferenceImage[],
@@ -598,7 +617,7 @@ export default function ResponsesPage() {
       let usedPreviousResponseId = previousResponseId
       let usedContextItemRefs = contextItemRefs
       let usedImageGenerationCallIds = imageGenerationCallIds
-      let retriedWithoutContext = false
+      let retriedWithTranscriptContext = false
       let retriedWithImageContext = false
       let retriedWithHttp = false
       let result: CallResponsesImageApiResult
@@ -632,15 +651,15 @@ export default function ResponsesPage() {
         } else if (!previousResponseId || !isContinuationUnavailableError(message)) {
           throw err
         } else if (fallbackImageContextItemRefs.length) {
+          const fallbackPrompt = buildContinuationFallbackPrompt(messages, trimmedPrompt)
           usedPreviousResponseId = ''
           usedContextItemRefs = fallbackImageContextItemRefs
           usedImageGenerationCallIds = getImageGenerationCallIdsFromContextRefs(fallbackImageContextItemRefs)
           retriedWithImageContext = true
-          setContextMode('image_generation_call')
           result = await callResponsesImageApiWebSocket({
             settings,
             model: trimmedModel,
-            prompt: trimmedPrompt,
+            prompt: fallbackPrompt,
             previousResponseId: '',
             contextItemRefs: fallbackImageContextItemRefs,
             reasoningEffort,
@@ -650,15 +669,15 @@ export default function ResponsesPage() {
         } else if (!canRetryWithoutContext) {
           throw err
         } else {
+          const fallbackPrompt = buildContinuationFallbackPrompt(messages, trimmedPrompt)
           usedPreviousResponseId = ''
           usedContextItemRefs = []
           usedImageGenerationCallIds = []
-          retriedWithoutContext = true
-          setContextMode('off')
+          retriedWithTranscriptContext = fallbackPrompt !== trimmedPrompt
           result = await callResponsesImageApiWebSocket({
             settings,
             model: trimmedModel,
-            prompt: trimmedPrompt,
+            prompt: fallbackPrompt,
             previousResponseId: '',
             contextItemRefs: [],
             reasoningEffort,
@@ -727,8 +746,8 @@ export default function ResponsesPage() {
             ? 'WebSocket 断开，已用 HTTP Responses 重试完成'
           : retriedWithImageContext
             ? '响应 ID 接续失败，已用图片上下文接续完成'
-          : retriedWithoutContext
-            ? '接续连接不可用，已按新对话完成'
+          : retriedWithTranscriptContext
+            ? '响应 ID 接续失败，已用本地对话转述完成'
           : 'Responses API 返回文本内容',
         imageApiSyncFailed ? 'error' : 'success',
       )
