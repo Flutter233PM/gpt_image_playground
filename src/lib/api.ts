@@ -97,6 +97,33 @@ interface ResponsesApiResponse {
   output?: ResponsesApiOutputItem[]
 }
 
+interface ResponsesImagePayloadBuildResult {
+  body: Record<string, unknown>
+  mime: string
+}
+
+interface ResponsesWebSocketEvent {
+  type?: string
+  id?: string
+  response?: ResponsesApiResponse & {
+    error?: {
+      message?: string
+    }
+    incomplete_details?: {
+      reason?: string
+    }
+  }
+  item?: ResponsesApiOutputItem
+  error?: {
+    message?: string
+  }
+  delta?: string
+  text?: string
+}
+
+const WEBSOCKET_PROTOCOL_TOKEN_RE = /^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/
+const SUB2API_WS_API_KEY_PROTOCOL_PREFIX = 'sub2api-api-key.'
+
 async function readErrorMessage(response: Response): Promise<string> {
   let errorMsg = `HTTP ${response.status}`
   try {
@@ -111,6 +138,121 @@ async function readErrorMessage(response: Response): Promise<string> {
     }
   }
   return errorMsg
+}
+
+function buildWebSocketApiUrl(baseUrl: string, path: string, proxyConfig?: ReturnType<typeof readClientDevProxyConfig>): string {
+  const apiUrl = buildApiUrl(baseUrl, path, proxyConfig)
+  const url = new URL(apiUrl, window.location.href)
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+  return url.toString()
+}
+
+function buildSub2ApiWebSocketProtocols(apiKey: string): string[] {
+  const trimmedApiKey = apiKey.trim()
+  const authProtocol = `${SUB2API_WS_API_KEY_PROTOCOL_PREFIX}${trimmedApiKey}`
+
+  if (!WEBSOCKET_PROTOCOL_TOKEN_RE.test(authProtocol)) {
+    throw new Error('当前 API Key 包含 WebSocket subprotocol 不支持的字符，无法使用 sub2api WS v2 代理')
+  }
+
+  return ['sub2api.responses.v2', authProtocol]
+}
+
+function buildResponsesImagePayload(opts: CallResponsesImageApiOptions): ResponsesImagePayloadBuildResult {
+  const { model, prompt, previousResponseId, reasoningEffort, toolOptions, inputImageDataUrls } = opts
+  const mime = MIME_MAP[toolOptions.output_format] || 'image/png'
+  const tool: Record<string, unknown> = {
+    type: 'image_generation',
+    action: toolOptions.action,
+    size: toolOptions.size,
+    quality: toolOptions.quality,
+    output_format: toolOptions.output_format,
+  }
+
+  if (toolOptions.output_format !== 'png' && toolOptions.output_compression != null) {
+    tool.output_compression = toolOptions.output_compression
+  }
+  tool.moderation = toolOptions.moderation
+
+  const content: Array<Record<string, string>> = []
+  const trimmedPrompt = prompt.trim()
+  if (trimmedPrompt) {
+    content.push({ type: 'input_text', text: trimmedPrompt })
+  }
+  for (const dataUrl of inputImageDataUrls) {
+    content.push({ type: 'input_image', image_url: dataUrl })
+  }
+
+  const body: Record<string, unknown> = {
+    model: model.trim(),
+    input: [
+      {
+        role: 'user',
+        content,
+      },
+    ],
+    tools: [tool],
+  }
+
+  const trimmedPreviousResponseId = previousResponseId?.trim()
+  if (trimmedPreviousResponseId) {
+    body.previous_response_id = trimmedPreviousResponseId
+  }
+  if (reasoningEffort !== 'default') {
+    body.reasoning = { effort: reasoningEffort }
+  }
+
+  return { body, mime }
+}
+
+function parseResponsesOutput(payload: ResponsesApiResponse, mime: string): CallResponsesImageApiResult {
+  const images: ResponsesImageOutput[] = []
+  const texts: ResponsesApiTextOutput[] = []
+
+  for (const item of payload.output ?? []) {
+    collectResponsesOutputItem(item, mime, images, texts)
+  }
+
+  return {
+    responseId: payload.id,
+    images,
+    texts,
+  }
+}
+
+function collectResponsesOutputItem(
+  item: ResponsesApiOutputItem,
+  mime: string,
+  images: ResponsesImageOutput[],
+  texts: ResponsesApiTextOutput[],
+) {
+  if (item.type === 'image_generation_call' && item.result) {
+    const alreadyCollected = images.some((image) => (
+      image.callId === item.id || image.image === normalizeBase64Image(item.result!, mime)
+    ))
+
+    if (!alreadyCollected) {
+      images.push({
+        image: normalizeBase64Image(item.result, mime),
+        revisedPrompt: item.revised_prompt,
+        callId: item.id,
+      })
+    }
+    return
+  }
+
+  for (const content of item.content ?? []) {
+    if (content.type === 'output_text' && content.text) {
+      texts.push({ text: content.text })
+    }
+  }
+}
+
+function readResponsesWebSocketError(event: ResponsesWebSocketEvent): string {
+  return event.error?.message
+    || event.response?.error?.message
+    || event.response?.incomplete_details?.reason
+    || 'Responses WebSocket 请求失败'
 }
 
 export async function callImageApi(opts: CallApiOptions): Promise<CallApiResult> {
@@ -221,49 +363,9 @@ export async function callImageApi(opts: CallApiOptions): Promise<CallApiResult>
 export async function callResponsesImageApi(
   opts: CallResponsesImageApiOptions,
 ): Promise<CallResponsesImageApiResult> {
-  const { settings, model, prompt, previousResponseId, reasoningEffort, toolOptions, inputImageDataUrls } = opts
+  const { settings } = opts
   const proxyConfig = readClientDevProxyConfig()
-  const mime = MIME_MAP[toolOptions.output_format] || 'image/png'
-  const tool: Record<string, unknown> = {
-    type: 'image_generation',
-    action: toolOptions.action,
-    size: toolOptions.size,
-    quality: toolOptions.quality,
-    output_format: toolOptions.output_format,
-  }
-
-  if (toolOptions.output_format !== 'png' && toolOptions.output_compression != null) {
-    tool.output_compression = toolOptions.output_compression
-  }
-  tool.moderation = toolOptions.moderation
-
-  const content: Array<Record<string, string>> = []
-  const trimmedPrompt = prompt.trim()
-  if (trimmedPrompt) {
-    content.push({ type: 'input_text', text: trimmedPrompt })
-  }
-  for (const dataUrl of inputImageDataUrls) {
-    content.push({ type: 'input_image', image_url: dataUrl })
-  }
-
-  const body: Record<string, unknown> = {
-    model: model.trim(),
-    input: [
-      {
-        role: 'user',
-        content,
-      },
-    ],
-    tools: [tool],
-  }
-
-  const trimmedPreviousResponseId = previousResponseId?.trim()
-  if (trimmedPreviousResponseId) {
-    body.previous_response_id = trimmedPreviousResponseId
-  }
-  if (reasoningEffort !== 'default') {
-    body.reasoning = { effort: reasoningEffort }
-  }
+  const { body, mime } = buildResponsesImagePayload(opts)
 
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), settings.timeout * 1000)
@@ -285,36 +387,158 @@ export async function callResponsesImageApi(
     }
 
     const payload = await response.json() as ResponsesApiResponse
-    const images: ResponsesImageOutput[] = []
-    const texts: ResponsesApiTextOutput[] = []
+    const result = parseResponsesOutput(payload, mime)
 
-    for (const item of payload.output ?? []) {
-      if (item.type === 'image_generation_call' && item.result) {
-        images.push({
-          image: normalizeBase64Image(item.result, mime),
-          revisedPrompt: item.revised_prompt,
-          callId: item.id,
-        })
-        continue
-      }
-
-      for (const content of item.content ?? []) {
-        if (content.type === 'output_text' && content.text) {
-          texts.push({ text: content.text })
-        }
-      }
-    }
-
-    if (!images.length && !texts.length) {
+    if (!result.images.length && !result.texts.length) {
       throw new Error('Responses API 未返回可显示内容')
     }
 
-    return {
-      responseId: payload.id,
-      images,
-      texts,
-    }
+    return result
   } finally {
     clearTimeout(timeoutId)
   }
+}
+
+export async function callResponsesImageApiWebSocket(
+  opts: CallResponsesImageApiOptions,
+): Promise<CallResponsesImageApiResult> {
+  const { settings } = opts
+  const proxyConfig = readClientDevProxyConfig()
+  const wsUrl = buildWebSocketApiUrl(settings.baseUrl, 'responses', proxyConfig)
+  const parsedWsUrl = new URL(wsUrl)
+
+  if (parsedWsUrl.origin !== window.location.origin.replace(/^http/, 'ws')) {
+    throw new Error('Responses WebSocket v2 需要使用同源 /v1/ 代理；请将 API URL 设为 same-origin 并配置 API_PROXY_URL')
+  }
+
+  const { body, mime } = buildResponsesImagePayload(opts)
+  const wsPayload = {
+    type: 'response.create',
+    stream: false,
+    ...body,
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false
+    let responseId = ''
+    let textBuffer = ''
+    const images: ResponsesImageOutput[] = []
+    const texts: ResponsesApiTextOutput[] = []
+    const timeoutId = window.setTimeout(() => {
+      rejectOnce(new Error(`Responses WebSocket 请求超时（${settings.timeout}s）`))
+      try {
+        ws.close(1000, 'timeout')
+      } catch {
+        /* ignore */
+      }
+    }, settings.timeout * 1000)
+
+    let ws: WebSocket
+    try {
+      ws = new WebSocket(wsUrl, buildSub2ApiWebSocketProtocols(settings.apiKey))
+    } catch (err) {
+      window.clearTimeout(timeoutId)
+      reject(err)
+      return
+    }
+
+    const rejectOnce = (err: Error) => {
+      if (settled) return
+      settled = true
+      window.clearTimeout(timeoutId)
+      reject(err)
+    }
+
+    const resolveOnce = (result: CallResponsesImageApiResult) => {
+      if (settled) return
+      settled = true
+      window.clearTimeout(timeoutId)
+      resolve(result)
+      try {
+        ws.close(1000, 'complete')
+      } catch {
+        /* ignore */
+      }
+    }
+
+    const finish = (payload?: ResponsesApiResponse) => {
+      const parsed = payload ? parseResponsesOutput(payload, mime) : undefined
+      const finalImages = parsed?.images.length ? parsed.images : images
+      const finalTexts = parsed?.texts.length ? parsed.texts : texts
+      const bufferedText = textBuffer.trim()
+
+      if (!finalTexts.length && bufferedText) {
+        finalTexts.push({ text: bufferedText })
+      }
+
+      if (!finalImages.length && !finalTexts.length) {
+        rejectOnce(new Error('Responses WebSocket 未返回可显示内容'))
+        return
+      }
+
+      resolveOnce({
+        responseId: parsed?.responseId || responseId || undefined,
+        images: finalImages,
+        texts: finalTexts,
+      })
+    }
+
+    const handleEvent = (event: ResponsesWebSocketEvent) => {
+      const eventResponseId = event.response?.id || event.id
+      if (eventResponseId) responseId = eventResponseId
+
+      switch (event.type) {
+        case 'response.created':
+        case 'response.in_progress':
+          return
+        case 'response.output_text.delta':
+          if (event.delta) textBuffer += event.delta
+          return
+        case 'response.output_text.done':
+          if (event.text) texts.push({ text: event.text })
+          return
+        case 'response.output_item.done':
+          if (event.item) collectResponsesOutputItem(event.item, mime, images, texts)
+          return
+        case 'response.completed':
+        case 'response.done':
+          finish(event.response)
+          return
+        case 'response.failed':
+        case 'response.incomplete':
+        case 'error':
+          rejectOnce(new Error(readResponsesWebSocketError(event)))
+          return
+        default:
+          if (event.item) collectResponsesOutputItem(event.item, mime, images, texts)
+      }
+    }
+
+    ws.onopen = () => {
+      ws.send(JSON.stringify(wsPayload))
+    }
+
+    ws.onmessage = async (messageEvent) => {
+      try {
+        const raw = typeof messageEvent.data === 'string'
+          ? messageEvent.data
+          : messageEvent.data instanceof Blob
+            ? await messageEvent.data.text()
+            : new TextDecoder().decode(messageEvent.data)
+        handleEvent(JSON.parse(raw) as ResponsesWebSocketEvent)
+      } catch (err) {
+        rejectOnce(err instanceof Error ? err : new Error(String(err)))
+      }
+    }
+
+    ws.onerror = () => {
+      rejectOnce(new Error('Responses WebSocket 连接失败'))
+    }
+
+    ws.onclose = (event) => {
+      if (settled) return
+      const reason = event.reason ? `：${event.reason}` : ''
+      rejectOnce(new Error(`Responses WebSocket 已关闭（${event.code}）${reason}`))
+    }
+  })
 }

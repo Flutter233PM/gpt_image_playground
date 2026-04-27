@@ -17,6 +17,16 @@ function loadDevProxyConfig() {
   }
 }
 
+function extractSub2ApiWebSocketApiKey(header: unknown): string {
+  const raw = Array.isArray(header)
+    ? header.join(',')
+    : typeof header === 'string'
+      ? header
+      : ''
+  const match = raw.match(/(?:^|,)\s*sub2api-api-key\.([^,\s]+)/i)
+  return match?.[1]?.trim() ?? ''
+}
+
 export default defineConfig(({ command }) => {
   const devProxyConfig = command === 'serve' ? loadDevProxyConfig() : null
 
@@ -36,6 +46,15 @@ export default defineConfig(({ command }) => {
                 target: devProxyConfig.target,
                 changeOrigin: devProxyConfig.changeOrigin,
                 secure: devProxyConfig.secure,
+                ws: true,
+                configure: (proxy) => {
+                  proxy.on('proxyReqWs', (proxyReq, req) => {
+                    const apiKey = extractSub2ApiWebSocketApiKey(req.headers['sec-websocket-protocol'])
+                    if (apiKey) {
+                      proxyReq.setHeader('Authorization', `Bearer ${apiKey}`)
+                    }
+                  })
+                },
                 rewrite: (path) =>
                   path.replace(
                     new RegExp(`^${devProxyConfig.prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`),

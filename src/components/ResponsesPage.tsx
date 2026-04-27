@@ -6,7 +6,7 @@ import type {
   StoredResponseConversation,
   StoredResponseReferenceImage,
 } from '../types'
-import { callResponsesImageApi } from '../lib/api'
+import { callResponsesImageApiWebSocket } from '../lib/api'
 import {
   deleteResponseConversation,
   getAllResponseConversations,
@@ -63,8 +63,8 @@ const REASONING_OPTIONS = [
 ]
 
 const CONTEXT_MODE_OPTIONS = [
-  { label: '兼容模式', value: 'off' },
-  { label: '接续 response.id', value: 'previous_response_id' },
+  { label: '不发送上下文', value: 'off' },
+  { label: 'WS v2 接续', value: 'previous_response_id' },
 ]
 
 function genId(): string {
@@ -128,10 +128,6 @@ function sortConversations(conversations: StoredResponseConversation[]): StoredR
   return [...conversations].sort((a, b) => b.updatedAt - a.updatedAt)
 }
 
-function isPreviousResponseUnsupported(message: string): boolean {
-  return /previous_response_id/i.test(message) && /WebSocket v2/i.test(message)
-}
-
 export default function ResponsesPage() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const messageListRef = useRef<HTMLDivElement>(null)
@@ -148,7 +144,7 @@ export default function ResponsesPage() {
   const [conversationResponseId, setConversationResponseId] = useState('')
   const [conversations, setConversations] = useState<StoredResponseConversation[]>([])
   const [activeConversationId, setActiveConversationId] = useState('')
-  const [contextMode, setContextMode] = useState<'off' | 'previous_response_id'>('off')
+  const [contextMode, setContextMode] = useState<'off' | 'previous_response_id'>('previous_response_id')
   const [isRunning, setIsRunning] = useState(false)
   const [showSizePicker, setShowSizePicker] = useState(false)
 
@@ -159,9 +155,9 @@ export default function ResponsesPage() {
 
   const statusText = useMemo(() => {
     if (isRunning) return '请求中'
-    if (shouldSendPreviousResponseId && conversationResponseId) return '已接续'
-    if (conversationResponseId) return '兼容模式'
-    return '新对话'
+    if (shouldSendPreviousResponseId && conversationResponseId) return 'WS v2 接续'
+    if (conversationResponseId) return '未发送上下文'
+    return 'WS v2 新对话'
   }, [conversationResponseId, isRunning, shouldSendPreviousResponseId])
 
   useEffect(() => {
@@ -333,7 +329,7 @@ export default function ResponsesPage() {
     scrollToBottom()
 
     try {
-      const result = await callResponsesImageApi({
+      const result = await callResponsesImageApiWebSocket({
         settings,
         model: trimmedModel,
         prompt: trimmedPrompt,
@@ -372,10 +368,6 @@ export default function ResponsesPage() {
       )
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
-      if (isPreviousResponseUnsupported(message)) {
-        setContextMode('off')
-        showToast('当前后端不支持 previous_response_id，已切换到兼容模式', 'error')
-      }
       const failedMessages = nextMessages.map((item) => (
         item.id === assistantId
           ? {
@@ -519,7 +511,7 @@ export default function ResponsesPage() {
                 Responses 对话生图
               </h2>
               <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
-                兼容模式默认不发送 previous_response_id，可手动切换为接续模式。
+                使用 sub2api Responses WebSocket v2，接续模式会发送 previous_response_id。
               </p>
             </div>
             <span className="hidden rounded-lg border border-gray-200 px-2 py-1 text-xs text-gray-500 dark:border-white/[0.08] dark:text-gray-400 sm:inline">
@@ -702,7 +694,7 @@ export default function ResponsesPage() {
           <div>
             <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">请求参数</h3>
             <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              兼容模式适合当前 sub2api HTTP Responses 代理。
+              WS v2 需要同源 /v1/ 代理，适合当前 sub2api 部署。
             </p>
           </div>
 
@@ -814,7 +806,7 @@ export default function ResponsesPage() {
           <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 dark:border-white/[0.08] dark:bg-gray-950">
             <div className="text-xs font-medium text-gray-600 dark:text-gray-300">当前上下文</div>
             <div className="mt-1 break-all font-mono text-[11px] text-gray-500 dark:text-gray-400">
-              {shouldSendPreviousResponseId ? conversationResponseId || '无' : '未发送'}
+              {shouldSendPreviousResponseId ? conversationResponseId || '下一条从新对话开始' : '本次不发送'}
             </div>
           </div>
         </aside>

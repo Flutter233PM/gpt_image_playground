@@ -125,7 +125,7 @@ docker run -d -p 8080:80 \
 浏览器 -> 当前站点 /v1/images/generations -> Nginx -> API_PROXY_URL/v1/images/generations
 ```
 
-长时间图片编辑请求可能超过 Nginx 默认 60 秒等待时间。镜像内置代理默认将 `/v1/*` 的读写超时设为 `600s`，可通过 `API_PROXY_TIMEOUT` 调整；上传体积上限默认 `256m`，可通过 `API_PROXY_MAX_BODY_SIZE` 调整。
+长时间图片编辑请求可能超过 Nginx 默认 60 秒等待时间。镜像内置代理默认将 `/v1/*` 的读写超时设为 `600s`，可通过 `API_PROXY_TIMEOUT` 调整；上传体积上限默认 `256m`，可通过 `API_PROXY_MAX_BODY_SIZE` 调整。Responses 对话生图会通过同源 `/v1/responses` 代理升级到 sub2api WebSocket v2，用于支持 `previous_response_id` 接续。
 
 **使用 Docker Compose：**
 
