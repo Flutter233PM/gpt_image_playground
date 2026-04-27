@@ -32,6 +32,9 @@ if [ -n "${API_PROXY_URL:-}" ]; then
         proxy_pass ${API_PROXY_URL}/v1/;
         proxy_http_version 1.1;
         proxy_ssl_server_name on;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_socket_keepalive on;
         proxy_connect_timeout ${API_PROXY_CONNECT_TIMEOUT};
         proxy_send_timeout ${API_PROXY_TIMEOUT};
         proxy_read_timeout ${API_PROXY_TIMEOUT};

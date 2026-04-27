@@ -123,6 +123,7 @@ interface ResponsesWebSocketEvent {
 
 const WEBSOCKET_PROTOCOL_TOKEN_RE = /^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/
 const SUB2API_WS_API_KEY_PROTOCOL_PREFIX = 'sub2api-api-key.'
+const RESPONSES_WS_ABNORMAL_CLOSE_CODE = 1006
 const RESPONSES_IMAGE_INSTRUCTIONS = [
   'You are an image generation assistant.',
   'Follow the latest user request and use prior response context when provided.',
@@ -261,6 +262,15 @@ function readResponsesWebSocketError(event: ResponsesWebSocketEvent): string {
     || event.response?.error?.message
     || event.response?.incomplete_details?.reason
     || 'Responses WebSocket 请求失败'
+}
+
+function readResponsesWebSocketCloseError(event: CloseEvent): string {
+  if (event.code === RESPONSES_WS_ABNORMAL_CLOSE_CODE) {
+    return 'Responses WebSocket 异常断开（1006）：代理或上游在长时间生成时关闭了连接，请检查 API_PROXY_TIMEOUT、Caddy/Nginx WebSocket 代理和 sub2api 日志'
+  }
+
+  const reason = event.reason ? `：${event.reason}` : ''
+  return `Responses WebSocket 已关闭（${event.code}）${reason}`
 }
 
 export async function callImageApi(opts: CallApiOptions): Promise<CallApiResult> {
@@ -545,8 +555,15 @@ export async function callResponsesImageApiWebSocket(
 
     ws.onclose = (event) => {
       if (settled) return
-      const reason = event.reason ? `：${event.reason}` : ''
-      rejectOnce(new Error(`Responses WebSocket 已关闭（${event.code}）${reason}`))
+      if (
+        event.code === RESPONSES_WS_ABNORMAL_CLOSE_CODE
+        && (images.length > 0 || texts.length > 0 || textBuffer.trim())
+      ) {
+        finish()
+        return
+      }
+
+      rejectOnce(new Error(readResponsesWebSocketCloseError(event)))
     }
   })
 }
