@@ -359,26 +359,32 @@ export async function editOutputs(task: TaskRecord) {
   showToast(`已添加 ${added} 张输出图到输入`, 'success')
 }
 
-/** 删除单条任务 */
-export async function removeTask(task: TaskRecord) {
-  const { tasks, setTasks, inputImages, showToast } = useStore.getState()
+/** 删除任务并清理不再被引用的图片 */
+export async function removeTasks(tasksToRemove: TaskRecord[]) {
+  if (!tasksToRemove.length) return
 
-  // 收集此任务关联的图片
-  const taskImageIds = new Set([
-    ...(task.inputImageIds || []),
-    ...(task.outputImages || []),
-  ])
+  const { tasks, setTasks, inputImages, showToast } = useStore.getState()
+  const removeIds = new Set(tasksToRemove.map((task) => task.id))
+  const existingRemoveIds = new Set(tasks.filter((task) => removeIds.has(task.id)).map((task) => task.id))
+  if (!existingRemoveIds.size) return
+
+  const taskImageIds = new Set<string>()
+  for (const task of tasksToRemove) {
+    if (!existingRemoveIds.has(task.id)) continue
+    for (const id of task.inputImageIds || []) taskImageIds.add(id)
+    for (const id of task.outputImages || []) taskImageIds.add(id)
+  }
 
   // 从列表移除
-  const remaining = tasks.filter((t) => t.id !== task.id)
+  const remaining = tasks.filter((task) => !existingRemoveIds.has(task.id))
   setTasks(remaining)
-  await dbDeleteTask(task.id)
+  await Promise.all([...existingRemoveIds].map((id) => dbDeleteTask(id)))
 
-  // 找出其他任务仍引用的图片
+  // 找出其他任务或当前输入区仍引用的图片
   const stillUsed = new Set<string>()
-  for (const t of remaining) {
-    for (const id of t.inputImageIds || []) stillUsed.add(id)
-    for (const id of t.outputImages || []) stillUsed.add(id)
+  for (const task of remaining) {
+    for (const id of task.inputImageIds || []) stillUsed.add(id)
+    for (const id of task.outputImages || []) stillUsed.add(id)
   }
   for (const img of inputImages) stillUsed.add(img.id)
 
@@ -390,7 +396,15 @@ export async function removeTask(task: TaskRecord) {
     }
   }
 
-  showToast('记录已删除', 'success')
+  showToast(
+    existingRemoveIds.size === 1 ? '记录已删除' : `已删除 ${existingRemoveIds.size} 条记录`,
+    'success',
+  )
+}
+
+/** 删除单条任务 */
+export async function removeTask(task: TaskRecord) {
+  await removeTasks([task])
 }
 
 /** 清空所有数据（含配置重置） */

@@ -9,6 +9,9 @@ interface Props {
   onEditOutputs: () => void
   onDelete: () => void
   onClick: () => void
+  selectMode?: boolean
+  selected?: boolean
+  onToggleSelect?: () => void
 }
 
 export default function TaskCard({
@@ -17,6 +20,9 @@ export default function TaskCard({
   onEditOutputs,
   onDelete,
   onClick,
+  selectMode = false,
+  selected = false,
+  onToggleSelect,
 }: Props) {
   const [thumbSrc, setThumbSrc] = useState<string>('')
   const [coverRatio, setCoverRatio] = useState<string>('')
@@ -82,19 +88,49 @@ export default function TaskCard({
     const ss = String(seconds % 60).padStart(2, '0')
     return `${mm}:${ss}`
   })()
+  const handleCardClick = () => {
+    if (selectMode) {
+      onToggleSelect?.()
+      return
+    }
+
+    onClick()
+  }
 
   return (
     <div
       className={`bg-white dark:bg-gray-900 rounded-xl border overflow-hidden cursor-pointer transition-all hover:-translate-y-0.5 hover:shadow-lg ${
-        task.status === 'running'
+        selectMode && selected
+          ? 'border-red-400 ring-2 ring-red-200 dark:border-red-400 dark:ring-red-500/30'
+          : task.status === 'running'
           ? 'border-blue-400 generating'
           : 'border-gray-200 dark:border-white/[0.08]'
       }`}
-      onClick={onClick}
+      onClick={handleCardClick}
     >
       <div className="flex h-40">
         {/* 左侧图片区域 */}
         <div className="w-40 min-w-[10rem] h-full bg-gray-100 dark:bg-black/20 relative flex items-center justify-center overflow-hidden flex-shrink-0">
+          {selectMode && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation()
+                onToggleSelect?.()
+              }}
+              aria-pressed={selected}
+              aria-label={selected ? '取消选择记录' : '选择记录'}
+              className={`absolute right-1.5 top-1.5 z-10 flex h-6 w-6 items-center justify-center rounded-md border transition ${
+                selected
+                  ? 'border-red-500 bg-red-500 text-white'
+                  : 'border-white/80 bg-black/35 text-transparent hover:bg-black/50'
+              }`}
+            >
+              <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+              </svg>
+            </button>
+          )}
           {task.status === 'running' && (
             <div className="flex flex-col items-center gap-2">
               <svg
@@ -211,70 +247,83 @@ export default function TaskCard({
                   {task.params.output_format}
                 </span>
               </div>
-            {/* 操作按钮 */}
-            <div
-              className="flex gap-1 justify-end flex-shrink-0"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <button
-                onClick={onReuse}
-                className="p-1.5 rounded-md hover:bg-blue-50 dark:hover:bg-blue-950/30 text-gray-400 hover:text-blue-500 transition"
-                title="复用配置"
-              >
-                <svg
-                  className="w-4 h-4"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
+            {selectMode ? (
+              <div className="flex justify-end">
+                <span
+                  className={`rounded-md px-2 py-1 text-xs ${
+                    selected
+                      ? 'bg-red-50 text-red-600 dark:bg-red-950/30 dark:text-red-300'
+                      : 'bg-gray-100 text-gray-500 dark:bg-white/[0.04] dark:text-gray-400'
+                  }`}
                 >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6"
-                  />
-                </svg>
-              </button>
-              <button
-                onClick={onEditOutputs}
-                className="p-1.5 rounded-md hover:bg-green-50 dark:hover:bg-green-950/30 text-gray-400 hover:text-green-500 transition disabled:opacity-30"
-                title="编辑输出"
-                disabled={!task.outputImages?.length}
+                  {selected ? '已选择' : '点击选择'}
+                </span>
+              </div>
+            ) : (
+              <div
+                className="flex gap-1 justify-end flex-shrink-0"
+                onClick={(e) => e.stopPropagation()}
               >
-                <svg
-                  className="w-4 h-4"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
+                <button
+                  onClick={onReuse}
+                  className="p-1.5 rounded-md hover:bg-blue-50 dark:hover:bg-blue-950/30 text-gray-400 hover:text-blue-500 transition"
+                  title="复用配置"
                 >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
-                  />
-                </svg>
-              </button>
-              <button
-                onClick={onDelete}
-                className="p-1.5 rounded-md hover:bg-red-50 dark:hover:bg-red-950/30 text-gray-400 hover:text-red-500 transition"
-                title="删除记录"
-              >
-                <svg
-                  className="w-4 h-4"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
+                  <svg
+                    className="w-4 h-4"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6"
+                    />
+                  </svg>
+                </button>
+                <button
+                  onClick={onEditOutputs}
+                  className="p-1.5 rounded-md hover:bg-green-50 dark:hover:bg-green-950/30 text-gray-400 hover:text-green-500 transition disabled:opacity-30"
+                  title="编辑输出"
+                  disabled={!task.outputImages?.length}
                 >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-                  />
-                </svg>
-              </button>
-            </div>
+                  <svg
+                    className="w-4 h-4"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
+                    />
+                  </svg>
+                </button>
+                <button
+                  onClick={onDelete}
+                  className="p-1.5 rounded-md hover:bg-red-50 dark:hover:bg-red-950/30 text-gray-400 hover:text-red-500 transition"
+                  title="删除记录"
+                >
+                  <svg
+                    className="w-4 h-4"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                    />
+                  </svg>
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </div>
