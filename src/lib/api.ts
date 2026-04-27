@@ -2,6 +2,7 @@ import type {
   AppSettings,
   ImageApiResponse,
   ResponsesApiTextOutput,
+  ResponsesContextItemRef,
   ResponsesImageOutput,
   ResponsesImageToolOptions,
   ResponsesReasoningEffort,
@@ -68,7 +69,7 @@ export interface CallResponsesImageApiOptions {
   model: string
   prompt: string
   previousResponseId?: string
-  imageGenerationCallIds?: string[]
+  contextItemRefs?: ResponsesContextItemRef[]
   reasoningEffort: ResponsesReasoningEffort
   toolOptions: ResponsesImageToolOptions
   inputImageDataUrls: string[]
@@ -101,6 +102,10 @@ interface ResponsesApiResponse {
 interface ResponsesImagePayloadBuildResult {
   body: Record<string, unknown>
   mime: string
+}
+
+interface ResponsesOutputParseState {
+  latestReasoningId?: string
 }
 
 interface ResponsesWebSocketEvent {
@@ -167,12 +172,32 @@ function buildSub2ApiWebSocketProtocols(apiKey: string): string[] {
   return ['sub2api.responses.v2', authProtocol]
 }
 
+function normalizeResponsesContextItemRefs(contextItemRefs: ResponsesContextItemRef[] | undefined): ResponsesContextItemRef[] {
+  const refs: ResponsesContextItemRef[] = []
+  const seen = new Set<string>()
+
+  for (const item of contextItemRefs ?? []) {
+    const type = item.type
+    const id = item.id.trim()
+
+    if ((type !== 'reasoning' && type !== 'image_generation_call') || !id) continue
+
+    const key = `${type}:${id}`
+    if (seen.has(key)) continue
+
+    seen.add(key)
+    refs.push({ type, id })
+  }
+
+  return refs
+}
+
 function buildResponsesImagePayload(opts: CallResponsesImageApiOptions): ResponsesImagePayloadBuildResult {
   const {
     model,
     prompt,
     previousResponseId,
-    imageGenerationCallIds,
+    contextItemRefs,
     reasoningEffort,
     toolOptions,
     inputImageDataUrls,
@@ -200,18 +225,12 @@ function buildResponsesImagePayload(opts: CallResponsesImageApiOptions): Respons
     content.push({ type: 'input_image', image_url: dataUrl })
   }
 
-  const input: Array<Record<string, unknown>> = [
-    {
-      role: 'user',
-      content,
-    },
-  ]
-  const uniqueImageGenerationCallIds = Array.from(new Set(
-    (imageGenerationCallIds ?? []).map((id) => id.trim()).filter(Boolean),
-  ))
-  for (const id of uniqueImageGenerationCallIds) {
-    input.push({ type: 'image_generation_call', id })
-  }
+  const input: Array<Record<string, unknown>> = normalizeResponsesContextItemRefs(contextItemRefs)
+    .map((item) => ({ type: item.type, id: item.id }))
+  input.push({
+    role: 'user',
+    content,
+  })
 
   const body: Record<string, unknown> = {
     model: model.trim(),
@@ -234,9 +253,10 @@ function buildResponsesImagePayload(opts: CallResponsesImageApiOptions): Respons
 function parseResponsesOutput(payload: ResponsesApiResponse, mime: string): CallResponsesImageApiResult {
   const images: ResponsesImageOutput[] = []
   const texts: ResponsesApiTextOutput[] = []
+  const state: ResponsesOutputParseState = {}
 
   for (const item of payload.output ?? []) {
-    collectResponsesOutputItem(item, mime, images, texts)
+    collectResponsesOutputItem(item, mime, images, texts, state)
   }
 
   return {
@@ -251,17 +271,34 @@ function collectResponsesOutputItem(
   mime: string,
   images: ResponsesImageOutput[],
   texts: ResponsesApiTextOutput[],
+  state?: ResponsesOutputParseState,
 ) {
+  if (item.type === 'reasoning') {
+    const reasoningId = item.id?.trim()
+    if (reasoningId && state) state.latestReasoningId = reasoningId
+    return
+  }
+
   if (item.type === 'image_generation_call' && item.result) {
-    const alreadyCollected = images.some((image) => (
-      image.callId === item.id || image.image === normalizeBase64Image(item.result!, mime)
+    const imageData = normalizeBase64Image(item.result, mime)
+    const callId = item.id?.trim()
+    const existing = images.find((image) => (
+      (callId ? image.callId === callId : false) || image.image === imageData
     ))
 
-    if (!alreadyCollected) {
+    if (existing) {
+      if (!existing.reasoningId && state?.latestReasoningId) {
+        existing.reasoningId = state.latestReasoningId
+      }
+      if (!existing.revisedPrompt && item.revised_prompt) {
+        existing.revisedPrompt = item.revised_prompt
+      }
+    } else {
       images.push({
-        image: normalizeBase64Image(item.result, mime),
+        image: imageData,
         revisedPrompt: item.revised_prompt,
-        callId: item.id,
+        callId,
+        reasoningId: state?.latestReasoningId,
       })
     }
     return
@@ -459,6 +496,7 @@ export async function callResponsesImageApiWebSocket(
     let textBuffer = ''
     const images: ResponsesImageOutput[] = []
     const texts: ResponsesApiTextOutput[] = []
+    const outputState: ResponsesOutputParseState = {}
     const timeoutId = window.setTimeout(() => {
       rejectOnce(new Error(`Responses WebSocket 请求超时（${settings.timeout}s）`))
       try {
@@ -533,7 +571,7 @@ export async function callResponsesImageApiWebSocket(
           if (event.text) texts.push({ text: event.text })
           return
         case 'response.output_item.done':
-          if (event.item) collectResponsesOutputItem(event.item, mime, images, texts)
+          if (event.item) collectResponsesOutputItem(event.item, mime, images, texts, outputState)
           return
         case 'response.completed':
         case 'response.done':
@@ -545,7 +583,7 @@ export async function callResponsesImageApiWebSocket(
           rejectOnce(new Error(readResponsesWebSocketError(event)))
           return
         default:
-          if (event.item) collectResponsesOutputItem(event.item, mime, images, texts)
+          if (event.item) collectResponsesOutputItem(event.item, mime, images, texts, outputState)
       }
     }
 

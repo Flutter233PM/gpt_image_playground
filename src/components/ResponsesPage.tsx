@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type {
+  ResponsesContextItemRef,
   ResponsesContextMode,
   ResponsesImageToolOptions,
   ResponsesReasoningEffort,
@@ -72,7 +73,7 @@ const REASONING_OPTIONS = [
 const CONTEXT_MODE_OPTIONS = [
   { label: '不发送上下文', value: 'off' },
   { label: '自动混合', value: 'auto' },
-  { label: '图片 ID 接续', value: 'image_generation_call' },
+  { label: '图片上下文接续', value: 'image_generation_call' },
   { label: '响应 ID 接续', value: 'previous_response_id' },
 ]
 
@@ -208,12 +209,51 @@ function sortConversations(conversations: StoredResponseConversation[]): StoredR
   return [...conversations].sort((a, b) => b.updatedAt - a.updatedAt)
 }
 
-function getLatestImageGenerationCallIds(messages: StoredResponseChatMessage[]): string[] {
+function uniqueContextItemRefs(items: ResponsesContextItemRef[]): ResponsesContextItemRef[] {
+  const refs: ResponsesContextItemRef[] = []
+  const seen = new Set<string>()
+
+  for (const item of items) {
+    const id = item.id.trim()
+    if (!id) continue
+
+    const key = `${item.type}:${id}`
+    if (seen.has(key)) continue
+
+    seen.add(key)
+    refs.push({ type: item.type, id })
+  }
+
+  return refs
+}
+
+function getImageGenerationCallIdsFromContextRefs(items: ResponsesContextItemRef[]): string[] {
+  return items
+    .filter((item) => item.type === 'image_generation_call')
+    .map((item) => item.id)
+}
+
+function formatContextItemRef(item: ResponsesContextItemRef): string {
+  return `${item.type === 'reasoning' ? 'reasoning' : 'image_generation_call'}: ${item.id}`
+}
+
+function getLatestImageContextItemRefs(messages: StoredResponseChatMessage[]): ResponsesContextItemRef[] {
   for (let i = messages.length - 1; i >= 0; i--) {
-    const ids = messages[i].outputs
-      .map((item) => item.callId?.trim())
-      .filter((id): id is string => Boolean(id))
-    if (ids.length) return Array.from(new Set(ids))
+    const refs: ResponsesContextItemRef[] = []
+
+    for (const item of messages[i].outputs) {
+      const reasoningId = item.reasoningId?.trim()
+      const callId = item.callId?.trim()
+
+      if (!reasoningId || !callId) continue
+
+      refs.push(
+        { type: 'reasoning', id: reasoningId },
+        { type: 'image_generation_call', id: callId },
+      )
+    }
+
+    if (refs.length) return uniqueContextItemRefs(refs)
   }
 
   return []
@@ -289,34 +329,37 @@ export default function ResponsesPage() {
   const canUseCompression = toolOptions.output_format !== 'png'
   const compressionValue = toolOptions.output_compression ?? 80
   const currentSize = normalizeImageSize(toolOptions.size) || 'auto'
-  const latestImageGenerationCallIds = useMemo(() => getLatestImageGenerationCallIds(messages), [messages])
-  const shouldSendImageGenerationCallIds = (
+  const latestImageContextItemRefs = useMemo(() => getLatestImageContextItemRefs(messages), [messages])
+  const hasLatestImageContext = latestImageContextItemRefs.length > 0
+  const shouldSendImageContext = (
     contextMode === 'image_generation_call'
-    || (contextMode === 'auto' && latestImageGenerationCallIds.length > 0)
+    || (contextMode === 'auto' && hasLatestImageContext)
   )
   const shouldSendPreviousResponseId = (
     contextMode === 'previous_response_id'
-    || (contextMode === 'auto' && latestImageGenerationCallIds.length === 0)
+    || (contextMode === 'auto' && !hasLatestImageContext)
   )
   const isActiveConversationRunning = isRunning && runningConversationId === activeConversationId
 
   const statusText = useMemo(() => {
     if (isActiveConversationRunning) return '请求中'
     if (isRunning) return '后台生成中'
-    if (shouldSendImageGenerationCallIds) return '图片 ID 接续'
+    if (shouldSendImageContext) return hasLatestImageContext ? '图片上下文接续' : '无可用图片上下文'
     if (shouldSendPreviousResponseId && conversationResponseId) return '响应 ID 接续'
     if (conversationResponseId) return '未发送上下文'
     return 'WS v2 新对话'
   }, [
     conversationResponseId,
+    hasLatestImageContext,
     isActiveConversationRunning,
     isRunning,
-    shouldSendImageGenerationCallIds,
+    shouldSendImageContext,
     shouldSendPreviousResponseId,
   ])
   const contextPreviewText = useMemo(() => {
-    if (shouldSendImageGenerationCallIds) {
-      return latestImageGenerationCallIds.join('\n') || '暂无图片 ID，下一条从新对话开始'
+    if (shouldSendImageContext) {
+      return latestImageContextItemRefs.map(formatContextItemRef).join('\n')
+        || '暂无 reasoning + image_generation_call 配对，下一条从新对话开始'
     }
     if (shouldSendPreviousResponseId) {
       return conversationResponseId || '下一条从新对话开始'
@@ -325,8 +368,8 @@ export default function ResponsesPage() {
     return '本次不发送'
   }, [
     conversationResponseId,
-    latestImageGenerationCallIds,
-    shouldSendImageGenerationCallIds,
+    latestImageContextItemRefs,
+    shouldSendImageContext,
     shouldSendPreviousResponseId,
   ])
 
@@ -492,15 +535,16 @@ export default function ResponsesPage() {
       return
     }
 
-    const fallbackImageGenerationCallIds = getLatestImageGenerationCallIds(messages)
-    const imageGenerationCallIds = shouldSendImageGenerationCallIds ? fallbackImageGenerationCallIds : []
+    const fallbackImageContextItemRefs = getLatestImageContextItemRefs(messages)
+    const contextItemRefs = shouldSendImageContext ? fallbackImageContextItemRefs : []
+    const imageGenerationCallIds = getImageGenerationCallIdsFromContextRefs(contextItemRefs)
     const previousResponseId = shouldSendPreviousResponseId ? conversationResponseId : ''
 
     if (
       toolOptions.action === 'edit'
       && !inputImages.length
       && !previousResponseId
-      && !imageGenerationCallIds.length
+      && !contextItemRefs.length
     ) {
       showToast('编辑模式需要参考图或已有对话上下文', 'error')
       return
@@ -517,6 +561,7 @@ export default function ResponsesPage() {
       texts: [],
       revisedPrompts: [],
       previousResponseId,
+      contextItemRefs,
       imageGenerationCallIds,
       createdAt: startedAt,
     }
@@ -530,6 +575,7 @@ export default function ResponsesPage() {
       texts: [],
       revisedPrompts: [],
       previousResponseId,
+      contextItemRefs,
       imageGenerationCallIds,
       status: 'running',
       createdAt: startedAt,
@@ -546,6 +592,7 @@ export default function ResponsesPage() {
 
     try {
       let usedPreviousResponseId = previousResponseId
+      let usedContextItemRefs = contextItemRefs
       let usedImageGenerationCallIds = imageGenerationCallIds
       let retriedWithoutContext = false
       let retriedWithImageContext = false
@@ -558,7 +605,7 @@ export default function ResponsesPage() {
           model: trimmedModel,
           prompt: trimmedPrompt,
           previousResponseId,
-          imageGenerationCallIds,
+          contextItemRefs,
           reasoningEffort,
           toolOptions,
           inputImageDataUrls: inputImages.map((image) => image.dataUrl),
@@ -573,16 +620,17 @@ export default function ResponsesPage() {
             model: trimmedModel,
             prompt: trimmedPrompt,
             previousResponseId,
-            imageGenerationCallIds,
+            contextItemRefs,
             reasoningEffort,
             toolOptions,
             inputImageDataUrls: inputImages.map((image) => image.dataUrl),
           })
         } else if (!previousResponseId || !isContinuationUnavailableError(message) || !canRetryWithoutContext) {
           throw err
-        } else if (fallbackImageGenerationCallIds.length) {
+        } else if (fallbackImageContextItemRefs.length) {
           usedPreviousResponseId = ''
-          usedImageGenerationCallIds = fallbackImageGenerationCallIds
+          usedContextItemRefs = fallbackImageContextItemRefs
+          usedImageGenerationCallIds = getImageGenerationCallIdsFromContextRefs(fallbackImageContextItemRefs)
           retriedWithImageContext = true
           setContextMode('image_generation_call')
           result = await callResponsesImageApiWebSocket({
@@ -590,13 +638,14 @@ export default function ResponsesPage() {
             model: trimmedModel,
             prompt: trimmedPrompt,
             previousResponseId: '',
-            imageGenerationCallIds: fallbackImageGenerationCallIds,
+            contextItemRefs: fallbackImageContextItemRefs,
             reasoningEffort,
             toolOptions,
             inputImageDataUrls: inputImages.map((image) => image.dataUrl),
           })
         } else {
           usedPreviousResponseId = ''
+          usedContextItemRefs = []
           usedImageGenerationCallIds = []
           retriedWithoutContext = true
           setContextMode('off')
@@ -605,7 +654,7 @@ export default function ResponsesPage() {
             model: trimmedModel,
             prompt: trimmedPrompt,
             previousResponseId: '',
-            imageGenerationCallIds: [],
+            contextItemRefs: [],
             reasoningEffort,
             toolOptions,
             inputImageDataUrls: inputImages.map((image) => image.dataUrl),
@@ -622,6 +671,7 @@ export default function ResponsesPage() {
           ? {
               ...message,
               previousResponseId: usedPreviousResponseId,
+              contextItemRefs: usedContextItemRefs,
               imageGenerationCallIds: usedImageGenerationCallIds,
               outputs: result.images,
               texts: result.texts,
@@ -634,6 +684,7 @@ export default function ResponsesPage() {
             ? {
                 ...message,
                 previousResponseId: usedPreviousResponseId,
+                contextItemRefs: usedContextItemRefs,
                 imageGenerationCallIds: usedImageGenerationCallIds,
               }
           : message
@@ -669,7 +720,7 @@ export default function ResponsesPage() {
           : retriedWithHttp
             ? 'WebSocket 断开，已用 HTTP Responses 重试完成'
           : retriedWithImageContext
-            ? '响应 ID 接续失败，已用图片 ID 接续完成'
+            ? '响应 ID 接续失败，已用图片上下文接续完成'
           : retriedWithoutContext
             ? '接续连接不可用，已按新对话完成'
           : 'Responses API 返回文本内容',
@@ -828,7 +879,7 @@ export default function ResponsesPage() {
                 Responses 对话生图
               </h2>
               <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
-                使用 sub2api Responses WebSocket v2，接续模式会发送 previous_response_id。
+                使用 sub2api Responses WebSocket v2，自动选择图片上下文或响应 ID 接续。
               </p>
             </div>
             <span className="hidden rounded-lg border border-gray-200 px-2 py-1 text-xs text-gray-500 dark:border-white/[0.08] dark:text-gray-400 sm:inline">
@@ -1061,7 +1112,7 @@ export default function ResponsesPage() {
           <div>
             <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">请求参数</h3>
             <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              自动混合优先用图片 ID 接续，缺少图片 ID 时再用响应 ID。
+              自动混合优先发送 reasoning + image_generation_call，缺少配对时再用响应 ID。
             </p>
           </div>
 
@@ -1172,7 +1223,7 @@ export default function ResponsesPage() {
 
           <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 dark:border-white/[0.08] dark:bg-gray-950">
             <div className="text-xs font-medium text-gray-600 dark:text-gray-300">当前上下文</div>
-            <div className="mt-1 break-all font-mono text-[11px] text-gray-500 dark:text-gray-400">
+            <div className="mt-1 whitespace-pre-wrap break-all font-mono text-[11px] text-gray-500 dark:text-gray-400">
               {contextPreviewText}
             </div>
           </div>
