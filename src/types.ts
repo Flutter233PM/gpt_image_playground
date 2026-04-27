@@ -112,6 +112,7 @@ export interface ImageApiResponse {
 // ===== Responses API 图片生成 =====
 
 export type ResponsesImageAction = 'auto' | 'generate' | 'edit'
+export type ResponsesContextMode = 'off' | 'auto' | 'previous_response_id' | 'image_generation_call'
 export type ResponsesReasoningEffort = 'default' | 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
 
 export interface ResponsesImageToolOptions {
@@ -149,6 +150,7 @@ export interface StoredResponseChatMessage {
   revisedPrompts: string[]
   responseId?: string
   previousResponseId?: string
+  imageGenerationCallIds?: string[]
   status?: 'running' | 'done' | 'error'
   error?: string | null
   elapsed?: number | null

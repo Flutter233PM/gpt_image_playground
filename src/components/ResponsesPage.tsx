@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type {
+  ResponsesContextMode,
   ResponsesImageToolOptions,
   ResponsesReasoningEffort,
   StoredResponseChatMessage,
@@ -70,7 +71,9 @@ const REASONING_OPTIONS = [
 
 const CONTEXT_MODE_OPTIONS = [
   { label: '不发送上下文', value: 'off' },
-  { label: 'WS v2 接续', value: 'previous_response_id' },
+  { label: '自动混合', value: 'auto' },
+  { label: '图片 ID 接续', value: 'image_generation_call' },
+  { label: '响应 ID 接续', value: 'previous_response_id' },
 ]
 
 interface ResponsesErrorDisplay {
@@ -205,6 +208,17 @@ function sortConversations(conversations: StoredResponseConversation[]): StoredR
   return [...conversations].sort((a, b) => b.updatedAt - a.updatedAt)
 }
 
+function getLatestImageGenerationCallIds(messages: StoredResponseChatMessage[]): string[] {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const ids = messages[i].outputs
+      .map((item) => item.callId?.trim())
+      .filter((id): id is string => Boolean(id))
+    if (ids.length) return Array.from(new Set(ids))
+  }
+
+  return []
+}
+
 async function createImageApiTaskFromResponsesResult(
   prompt: string,
   inputImages: StoredResponseReferenceImage[],
@@ -267,7 +281,7 @@ export default function ResponsesPage() {
   const [conversationResponseId, setConversationResponseId] = useState('')
   const [conversations, setConversations] = useState<StoredResponseConversation[]>([])
   const [activeConversationId, setActiveConversationId] = useState('')
-  const [contextMode, setContextMode] = useState<'off' | 'previous_response_id'>('off')
+  const [contextMode, setContextMode] = useState<ResponsesContextMode>('auto')
   const [isRunning, setIsRunning] = useState(false)
   const [runningConversationId, setRunningConversationId] = useState('')
   const [showSizePicker, setShowSizePicker] = useState(false)
@@ -275,16 +289,46 @@ export default function ResponsesPage() {
   const canUseCompression = toolOptions.output_format !== 'png'
   const compressionValue = toolOptions.output_compression ?? 80
   const currentSize = normalizeImageSize(toolOptions.size) || 'auto'
-  const shouldSendPreviousResponseId = contextMode === 'previous_response_id'
+  const latestImageGenerationCallIds = useMemo(() => getLatestImageGenerationCallIds(messages), [messages])
+  const shouldSendImageGenerationCallIds = (
+    contextMode === 'image_generation_call'
+    || (contextMode === 'auto' && latestImageGenerationCallIds.length > 0)
+  )
+  const shouldSendPreviousResponseId = (
+    contextMode === 'previous_response_id'
+    || (contextMode === 'auto' && latestImageGenerationCallIds.length === 0)
+  )
   const isActiveConversationRunning = isRunning && runningConversationId === activeConversationId
 
   const statusText = useMemo(() => {
     if (isActiveConversationRunning) return '请求中'
     if (isRunning) return '后台生成中'
-    if (shouldSendPreviousResponseId && conversationResponseId) return 'WS v2 接续'
+    if (shouldSendImageGenerationCallIds) return '图片 ID 接续'
+    if (shouldSendPreviousResponseId && conversationResponseId) return '响应 ID 接续'
     if (conversationResponseId) return '未发送上下文'
     return 'WS v2 新对话'
-  }, [conversationResponseId, isActiveConversationRunning, isRunning, shouldSendPreviousResponseId])
+  }, [
+    conversationResponseId,
+    isActiveConversationRunning,
+    isRunning,
+    shouldSendImageGenerationCallIds,
+    shouldSendPreviousResponseId,
+  ])
+  const contextPreviewText = useMemo(() => {
+    if (shouldSendImageGenerationCallIds) {
+      return latestImageGenerationCallIds.join('\n') || '暂无图片 ID，下一条从新对话开始'
+    }
+    if (shouldSendPreviousResponseId) {
+      return conversationResponseId || '下一条从新对话开始'
+    }
+
+    return '本次不发送'
+  }, [
+    conversationResponseId,
+    latestImageGenerationCallIds,
+    shouldSendImageGenerationCallIds,
+    shouldSendPreviousResponseId,
+  ])
 
   useEffect(() => {
     activeConversationIdRef.current = activeConversationId
@@ -448,9 +492,16 @@ export default function ResponsesPage() {
       return
     }
 
+    const fallbackImageGenerationCallIds = getLatestImageGenerationCallIds(messages)
+    const imageGenerationCallIds = shouldSendImageGenerationCallIds ? fallbackImageGenerationCallIds : []
     const previousResponseId = shouldSendPreviousResponseId ? conversationResponseId : ''
 
-    if (toolOptions.action === 'edit' && !inputImages.length && !previousResponseId) {
+    if (
+      toolOptions.action === 'edit'
+      && !inputImages.length
+      && !previousResponseId
+      && !imageGenerationCallIds.length
+    ) {
       showToast('编辑模式需要参考图或已有对话上下文', 'error')
       return
     }
@@ -466,6 +517,7 @@ export default function ResponsesPage() {
       texts: [],
       revisedPrompts: [],
       previousResponseId,
+      imageGenerationCallIds,
       createdAt: startedAt,
     }
     const assistantId = genId()
@@ -478,6 +530,7 @@ export default function ResponsesPage() {
       texts: [],
       revisedPrompts: [],
       previousResponseId,
+      imageGenerationCallIds,
       status: 'running',
       createdAt: startedAt,
     }
@@ -493,7 +546,9 @@ export default function ResponsesPage() {
 
     try {
       let usedPreviousResponseId = previousResponseId
+      let usedImageGenerationCallIds = imageGenerationCallIds
       let retriedWithoutContext = false
+      let retriedWithImageContext = false
       let retriedWithHttp = false
       let result: CallResponsesImageApiResult
 
@@ -503,6 +558,7 @@ export default function ResponsesPage() {
           model: trimmedModel,
           prompt: trimmedPrompt,
           previousResponseId,
+          imageGenerationCallIds,
           reasoningEffort,
           toolOptions,
           inputImageDataUrls: inputImages.map((image) => image.dataUrl),
@@ -517,14 +573,31 @@ export default function ResponsesPage() {
             model: trimmedModel,
             prompt: trimmedPrompt,
             previousResponseId,
+            imageGenerationCallIds,
             reasoningEffort,
             toolOptions,
             inputImageDataUrls: inputImages.map((image) => image.dataUrl),
           })
         } else if (!previousResponseId || !isContinuationUnavailableError(message) || !canRetryWithoutContext) {
           throw err
+        } else if (fallbackImageGenerationCallIds.length) {
+          usedPreviousResponseId = ''
+          usedImageGenerationCallIds = fallbackImageGenerationCallIds
+          retriedWithImageContext = true
+          setContextMode('image_generation_call')
+          result = await callResponsesImageApiWebSocket({
+            settings,
+            model: trimmedModel,
+            prompt: trimmedPrompt,
+            previousResponseId: '',
+            imageGenerationCallIds: fallbackImageGenerationCallIds,
+            reasoningEffort,
+            toolOptions,
+            inputImageDataUrls: inputImages.map((image) => image.dataUrl),
+          })
         } else {
           usedPreviousResponseId = ''
+          usedImageGenerationCallIds = []
           retriedWithoutContext = true
           setContextMode('off')
           result = await callResponsesImageApiWebSocket({
@@ -532,6 +605,7 @@ export default function ResponsesPage() {
             model: trimmedModel,
             prompt: trimmedPrompt,
             previousResponseId: '',
+            imageGenerationCallIds: [],
             reasoningEffort,
             toolOptions,
             inputImageDataUrls: inputImages.map((image) => image.dataUrl),
@@ -548,6 +622,7 @@ export default function ResponsesPage() {
           ? {
               ...message,
               previousResponseId: usedPreviousResponseId,
+              imageGenerationCallIds: usedImageGenerationCallIds,
               outputs: result.images,
               texts: result.texts,
               revisedPrompts,
@@ -559,6 +634,7 @@ export default function ResponsesPage() {
             ? {
                 ...message,
                 previousResponseId: usedPreviousResponseId,
+                imageGenerationCallIds: usedImageGenerationCallIds,
               }
           : message
       ))
@@ -592,6 +668,8 @@ export default function ResponsesPage() {
           ? `Responses API 返回 ${result.images.length} 张图片${syncedToImageApi ? '，已同步到 Image API' : imageApiSyncFailed ? '，同步到 Image API 失败' : ''}`
           : retriedWithHttp
             ? 'WebSocket 断开，已用 HTTP Responses 重试完成'
+          : retriedWithImageContext
+            ? '响应 ID 接续失败，已用图片 ID 接续完成'
           : retriedWithoutContext
             ? '接续连接不可用，已按新对话完成'
           : 'Responses API 返回文本内容',
@@ -983,7 +1061,7 @@ export default function ResponsesPage() {
           <div>
             <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">请求参数</h3>
             <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              WS v2 需要同源 /v1/ 代理，适合当前 sub2api 部署。
+              自动混合优先用图片 ID 接续，缺少图片 ID 时再用响应 ID。
             </p>
           </div>
 
@@ -1011,7 +1089,7 @@ export default function ResponsesPage() {
             <span className="mb-1.5 block text-xs font-medium text-gray-600 dark:text-gray-300">上下文</span>
             <Select
               value={contextMode}
-              onChange={(value) => setContextMode(value)}
+              onChange={(value) => setContextMode(value as ResponsesContextMode)}
               options={CONTEXT_MODE_OPTIONS}
               className="rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-sm text-gray-900 transition hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500/20 dark:border-white/[0.08] dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-white/[0.06]"
             />
@@ -1095,7 +1173,7 @@ export default function ResponsesPage() {
           <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 dark:border-white/[0.08] dark:bg-gray-950">
             <div className="text-xs font-medium text-gray-600 dark:text-gray-300">当前上下文</div>
             <div className="mt-1 break-all font-mono text-[11px] text-gray-500 dark:text-gray-400">
-              {shouldSendPreviousResponseId ? conversationResponseId || '下一条从新对话开始' : '本次不发送'}
+              {contextPreviewText}
             </div>
           </div>
         </aside>

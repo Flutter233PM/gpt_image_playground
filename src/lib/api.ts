@@ -68,6 +68,7 @@ export interface CallResponsesImageApiOptions {
   model: string
   prompt: string
   previousResponseId?: string
+  imageGenerationCallIds?: string[]
   reasoningEffort: ResponsesReasoningEffort
   toolOptions: ResponsesImageToolOptions
   inputImageDataUrls: string[]
@@ -167,7 +168,15 @@ function buildSub2ApiWebSocketProtocols(apiKey: string): string[] {
 }
 
 function buildResponsesImagePayload(opts: CallResponsesImageApiOptions): ResponsesImagePayloadBuildResult {
-  const { model, prompt, previousResponseId, reasoningEffort, toolOptions, inputImageDataUrls } = opts
+  const {
+    model,
+    prompt,
+    previousResponseId,
+    imageGenerationCallIds,
+    reasoningEffort,
+    toolOptions,
+    inputImageDataUrls,
+  } = opts
   const mime = MIME_MAP[toolOptions.output_format] || 'image/png'
   const tool: Record<string, unknown> = {
     type: 'image_generation',
@@ -191,15 +200,23 @@ function buildResponsesImagePayload(opts: CallResponsesImageApiOptions): Respons
     content.push({ type: 'input_image', image_url: dataUrl })
   }
 
+  const input: Array<Record<string, unknown>> = [
+    {
+      role: 'user',
+      content,
+    },
+  ]
+  const uniqueImageGenerationCallIds = Array.from(new Set(
+    (imageGenerationCallIds ?? []).map((id) => id.trim()).filter(Boolean),
+  ))
+  for (const id of uniqueImageGenerationCallIds) {
+    input.push({ type: 'image_generation_call', id })
+  }
+
   const body: Record<string, unknown> = {
     model: model.trim(),
     instructions: RESPONSES_IMAGE_INSTRUCTIONS,
-    input: [
-      {
-        role: 'user',
-        content,
-      },
-    ],
+    input,
     tools: [tool],
   }
 
