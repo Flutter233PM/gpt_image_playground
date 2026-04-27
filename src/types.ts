@@ -9,6 +9,8 @@ export interface AppSettings {
   timeout: number
 }
 
+export type ActiveView = 'image-api' | 'responses-api'
+
 const configuredDefaultBaseUrl = import.meta.env.VITE_DEFAULT_API_URL?.trim()
 const DEFAULT_BASE_URL = normalizeBaseUrl(
   configuredDefaultBaseUrl === undefined || configuredDefaultBaseUrl === ''
@@ -105,6 +107,61 @@ export interface ImageResponseItem {
 
 export interface ImageApiResponse {
   data: ImageResponseItem[]
+}
+
+// ===== Responses API 图片生成 =====
+
+export type ResponsesImageAction = 'auto' | 'generate' | 'edit'
+export type ResponsesReasoningEffort = 'default' | 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
+
+export interface ResponsesImageToolOptions {
+  action: ResponsesImageAction
+  size: string
+  quality: 'auto' | 'low' | 'medium' | 'high'
+  output_format: 'png' | 'jpeg' | 'webp'
+  output_compression: number | null
+  moderation: 'auto' | 'low'
+}
+
+export interface ResponsesImageOutput {
+  image: string
+  revisedPrompt?: string
+  callId?: string
+}
+
+export interface ResponsesApiTextOutput {
+  text: string
+}
+
+export interface StoredResponseReferenceImage {
+  id: string
+  name: string
+  dataUrl: string
+}
+
+export interface StoredResponseChatMessage {
+  id: string
+  role: 'user' | 'assistant'
+  text: string
+  images: StoredResponseReferenceImage[]
+  outputs: ResponsesImageOutput[]
+  texts: ResponsesApiTextOutput[]
+  revisedPrompts: string[]
+  responseId?: string
+  previousResponseId?: string
+  status?: 'running' | 'done' | 'error'
+  error?: string | null
+  elapsed?: number | null
+  createdAt: number
+}
+
+export interface StoredResponseConversation {
+  id: string
+  title: string
+  messages: StoredResponseChatMessage[]
+  responseId: string
+  createdAt: number
+  updatedAt: number
 }
 
 // ===== 导出数据 =====

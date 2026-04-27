@@ -6,6 +6,7 @@ import Header from './components/Header'
 import SearchBar from './components/SearchBar'
 import TaskGrid from './components/TaskGrid'
 import InputBar from './components/InputBar'
+import ResponsesPage from './components/ResponsesPage'
 import DetailModal from './components/DetailModal'
 import Lightbox from './components/Lightbox'
 import SettingsModal from './components/SettingsModal'
@@ -14,6 +15,7 @@ import Toast from './components/Toast'
 import ImageContextMenu from './components/ImageContextMenu'
 
 export default function App() {
+  const activeView = useStore((s) => s.activeView)
   const setSettings = useStore((s) => s.setSettings)
 
   useEffect(() => {
@@ -47,13 +49,21 @@ export default function App() {
   return (
     <>
       <Header />
-      <main className="max-w-7xl mx-auto px-4 pb-48">
-        <SearchBar />
-        <TaskGrid />
-      </main>
-      <InputBar />
-      <DetailModal />
-      <Lightbox />
+      {activeView === 'responses-api' ? (
+        <main className="max-w-7xl mx-auto px-4 pb-12">
+          <ResponsesPage />
+        </main>
+      ) : (
+        <>
+          <main className="max-w-7xl mx-auto px-4 pb-48">
+            <SearchBar />
+            <TaskGrid />
+          </main>
+          <InputBar />
+          <DetailModal />
+          <Lightbox />
+        </>
+      )}
       <SettingsModal />
       <ConfirmDialog />
       <Toast />

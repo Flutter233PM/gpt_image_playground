@@ -401,13 +401,13 @@ export default function InputBar() {
         />
       </label>
       <label className="flex flex-col gap-0.5">
-        <span className="text-gray-400 dark:text-gray-500 ml-1">审核</span>
+        <span className="text-gray-400 dark:text-gray-500 ml-1">审核强度</span>
         <Select
           value={params.moderation}
           onChange={(val) => setParams({ moderation: val as any })}
           options={[
-            { label: 'auto', value: 'auto' },
-            { label: 'low', value: 'low' },
+            { label: '标准 auto', value: 'auto' },
+            { label: '低限制 low', value: 'low' },
           ]}
           className={selectClass}
         />

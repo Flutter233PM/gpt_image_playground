@@ -392,7 +392,7 @@ export default function DetailModal() {
                 <span className="text-gray-700 dark:text-gray-300 font-medium">{task.params.output_format}</span>
               </div>
               <div className="bg-gray-50 dark:bg-white/[0.03] rounded-lg px-3 py-2">
-                <span className="text-gray-400 dark:text-gray-500">审核</span>
+                <span className="text-gray-400 dark:text-gray-500">审核强度</span>
                 <br />
                 <span className="text-gray-700 dark:text-gray-300 font-medium">{task.params.moderation}</span>
               </div>

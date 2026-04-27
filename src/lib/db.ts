@@ -1,9 +1,10 @@
-import type { TaskRecord, StoredImage } from '../types'
+import type { StoredImage, StoredResponseConversation, TaskRecord } from '../types'
 
 const DB_NAME = 'gpt-image-playground'
-const DB_VERSION = 1
+const DB_VERSION = 2
 const STORE_TASKS = 'tasks'
 const STORE_IMAGES = 'images'
+const STORE_RESPONSE_CONVERSATIONS = 'responseConversations'
 
 function openDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -15,6 +16,9 @@ function openDB(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(STORE_IMAGES)) {
         db.createObjectStore(STORE_IMAGES, { keyPath: 'id' })
+      }
+      if (!db.objectStoreNames.contains(STORE_RESPONSE_CONVERSATIONS)) {
+        db.createObjectStore(STORE_RESPONSE_CONVERSATIONS, { keyPath: 'id' })
       }
     }
     req.onsuccess = () => resolve(req.result)
@@ -77,6 +81,20 @@ export function deleteImage(id: string): Promise<undefined> {
 
 export function clearImages(): Promise<undefined> {
   return dbTransaction(STORE_IMAGES, 'readwrite', (s) => s.clear())
+}
+
+// ===== Responses conversations =====
+
+export function getAllResponseConversations(): Promise<StoredResponseConversation[]> {
+  return dbTransaction(STORE_RESPONSE_CONVERSATIONS, 'readonly', (s) => s.getAll())
+}
+
+export function putResponseConversation(conversation: StoredResponseConversation): Promise<IDBValidKey> {
+  return dbTransaction(STORE_RESPONSE_CONVERSATIONS, 'readwrite', (s) => s.put(conversation))
+}
+
+export function deleteResponseConversation(id: string): Promise<undefined> {
+  return dbTransaction(STORE_RESPONSE_CONVERSATIONS, 'readwrite', (s) => s.delete(id))
 }
 
 // ===== Image hashing & dedup =====

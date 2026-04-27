@@ -1,4 +1,12 @@
-import type { AppSettings, ImageApiResponse, TaskParams } from '../types'
+import type {
+  AppSettings,
+  ImageApiResponse,
+  ResponsesApiTextOutput,
+  ResponsesImageOutput,
+  ResponsesImageToolOptions,
+  ResponsesReasoningEffort,
+  TaskParams,
+} from '../types'
 import { buildApiUrl, readClientDevProxyConfig } from './devProxy'
 
 const MIME_MAP: Record<string, string> = {
@@ -53,6 +61,56 @@ export interface CallApiOptions {
 export interface CallApiResult {
   /** base64 data URL 列表 */
   images: string[]
+}
+
+export interface CallResponsesImageApiOptions {
+  settings: AppSettings
+  model: string
+  prompt: string
+  previousResponseId?: string
+  reasoningEffort: ResponsesReasoningEffort
+  toolOptions: ResponsesImageToolOptions
+  inputImageDataUrls: string[]
+}
+
+export interface CallResponsesImageApiResult {
+  responseId?: string
+  images: ResponsesImageOutput[]
+  texts: ResponsesApiTextOutput[]
+}
+
+interface ResponsesApiContentItem {
+  type?: string
+  text?: string
+}
+
+interface ResponsesApiOutputItem {
+  id?: string
+  type?: string
+  result?: string
+  revised_prompt?: string
+  content?: ResponsesApiContentItem[]
+}
+
+interface ResponsesApiResponse {
+  id?: string
+  output?: ResponsesApiOutputItem[]
+}
+
+async function readErrorMessage(response: Response): Promise<string> {
+  let errorMsg = `HTTP ${response.status}`
+  try {
+    const errJson = await response.json()
+    if (errJson.error?.message) errorMsg = errJson.error.message
+    else if (errJson.message) errorMsg = errJson.message
+  } catch {
+    try {
+      errorMsg = await response.text()
+    } catch {
+      /* ignore */
+    }
+  }
+  return errorMsg
 }
 
 export async function callImageApi(opts: CallApiOptions): Promise<CallApiResult> {
@@ -128,19 +186,7 @@ export async function callImageApi(opts: CallApiOptions): Promise<CallApiResult>
     }
 
     if (!response.ok) {
-      let errorMsg = `HTTP ${response.status}`
-      try {
-        const errJson = await response.json()
-        if (errJson.error?.message) errorMsg = errJson.error.message
-        else if (errJson.message) errorMsg = errJson.message
-      } catch {
-        try {
-          errorMsg = await response.text()
-        } catch {
-          /* ignore */
-        }
-      }
-      throw new Error(errorMsg)
+      throw new Error(await readErrorMessage(response))
     }
 
     const payload = await response.json() as ImageApiResponse
@@ -167,6 +213,107 @@ export async function callImageApi(opts: CallApiOptions): Promise<CallApiResult>
     }
 
     return { images }
+  } finally {
+    clearTimeout(timeoutId)
+  }
+}
+
+export async function callResponsesImageApi(
+  opts: CallResponsesImageApiOptions,
+): Promise<CallResponsesImageApiResult> {
+  const { settings, model, prompt, previousResponseId, reasoningEffort, toolOptions, inputImageDataUrls } = opts
+  const proxyConfig = readClientDevProxyConfig()
+  const mime = MIME_MAP[toolOptions.output_format] || 'image/png'
+  const tool: Record<string, unknown> = {
+    type: 'image_generation',
+    action: toolOptions.action,
+    size: toolOptions.size,
+    quality: toolOptions.quality,
+    output_format: toolOptions.output_format,
+  }
+
+  if (toolOptions.output_format !== 'png' && toolOptions.output_compression != null) {
+    tool.output_compression = toolOptions.output_compression
+  }
+  tool.moderation = toolOptions.moderation
+
+  const content: Array<Record<string, string>> = []
+  const trimmedPrompt = prompt.trim()
+  if (trimmedPrompt) {
+    content.push({ type: 'input_text', text: trimmedPrompt })
+  }
+  for (const dataUrl of inputImageDataUrls) {
+    content.push({ type: 'input_image', image_url: dataUrl })
+  }
+
+  const body: Record<string, unknown> = {
+    model: model.trim(),
+    input: [
+      {
+        role: 'user',
+        content,
+      },
+    ],
+    tools: [tool],
+  }
+
+  const trimmedPreviousResponseId = previousResponseId?.trim()
+  if (trimmedPreviousResponseId) {
+    body.previous_response_id = trimmedPreviousResponseId
+  }
+  if (reasoningEffort !== 'default') {
+    body.reasoning = { effort: reasoningEffort }
+  }
+
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), settings.timeout * 1000)
+
+  try {
+    const response = await fetch(buildApiUrl(settings.baseUrl, 'responses', proxyConfig), {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${settings.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      cache: 'no-store',
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    })
+
+    if (!response.ok) {
+      throw new Error(await readErrorMessage(response))
+    }
+
+    const payload = await response.json() as ResponsesApiResponse
+    const images: ResponsesImageOutput[] = []
+    const texts: ResponsesApiTextOutput[] = []
+
+    for (const item of payload.output ?? []) {
+      if (item.type === 'image_generation_call' && item.result) {
+        images.push({
+          image: normalizeBase64Image(item.result, mime),
+          revisedPrompt: item.revised_prompt,
+          callId: item.id,
+        })
+        continue
+      }
+
+      for (const content of item.content ?? []) {
+        if (content.type === 'output_text' && content.text) {
+          texts.push({ text: content.text })
+        }
+      }
+    }
+
+    if (!images.length && !texts.length) {
+      throw new Error('Responses API 未返回可显示内容')
+    }
+
+    return {
+      responseId: payload.id,
+      images,
+      texts,
+    }
   } finally {
     clearTimeout(timeoutId)
   }

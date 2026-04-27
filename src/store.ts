@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type {
+  ActiveView,
   AppSettings,
   TaskParams,
   InputImage,
@@ -47,6 +48,10 @@ export async function ensureImageCached(id: string): Promise<string | undefined>
 // ===== Store 类型 =====
 
 interface AppState {
+  // 页面
+  activeView: ActiveView
+  setActiveView: (view: ActiveView) => void
+
   // 设置
   settings: AppSettings
   setSettings: (s: Partial<AppSettings>) => void
@@ -99,6 +104,10 @@ interface AppState {
 export const useStore = create<AppState>()(
   persist(
     (set, get) => ({
+      // View
+      activeView: 'image-api',
+      setActiveView: (activeView) => set({ activeView }),
+
       // Settings
       settings: { ...DEFAULT_SETTINGS },
       setSettings: (s) => set((st) => ({ settings: { ...st.settings, ...s } })),
@@ -163,6 +172,7 @@ export const useStore = create<AppState>()(
     {
       name: 'gpt-image-playground',
       partialize: (state) => ({
+        activeView: state.activeView,
         settings: state.settings,
         params: state.params,
       }),
