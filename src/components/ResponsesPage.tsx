@@ -112,16 +112,44 @@ function deriveConversationTitle(messages: StoredResponseChatMessage[], fallback
   return text.length > 28 ? `${text.slice(0, 28)}...` : text
 }
 
+const REFRESH_INTERRUPTED_ERROR = '请求在页面刷新时停止，请重新发送这一轮'
+
+function hasRecoverableAssistantContent(message: StoredResponseChatMessage): boolean {
+  return (
+    (message.outputs?.length ?? 0) > 0
+    || (message.texts?.length ?? 0) > 0
+    || (message.revisedPrompts?.length ?? 0) > 0
+    || Boolean(message.responseId)
+  )
+}
+
 function normalizeLoadedMessages(messages: StoredResponseChatMessage[]): StoredResponseChatMessage[] {
-  return messages.map((message) => (
-    message.status === 'running'
-      ? {
-          ...message,
-          status: 'error',
-          error: message.error || '页面刷新后请求已中断',
-        }
-      : message
-  ))
+  let changed = false
+  const normalized: StoredResponseChatMessage[] = []
+
+  for (const message of messages) {
+    if (message.status !== 'running') {
+      normalized.push(message)
+      continue
+    }
+
+    changed = true
+    if (
+      message.role === 'assistant'
+      && !message.error
+      && !hasRecoverableAssistantContent(message)
+    ) {
+      continue
+    }
+
+    normalized.push({
+      ...message,
+      status: 'error',
+      error: message.error || REFRESH_INTERRUPTED_ERROR,
+    })
+  }
+
+  return changed ? normalized : messages
 }
 
 function sortConversations(conversations: StoredResponseConversation[]): StoredResponseConversation[] {
@@ -167,10 +195,16 @@ export default function ResponsesPage() {
       .then((items) => {
         if (!active) return
 
-        const loaded = sortConversations(items.map((item) => ({
-          ...item,
-          messages: normalizeLoadedMessages(item.messages),
-        })))
+        const loaded = sortConversations(items.map((item) => {
+          const messages = normalizeLoadedMessages(item.messages)
+          if (messages === item.messages) return item
+
+          const normalized = { ...item, messages }
+          putResponseConversation(normalized).catch((err) => {
+            showToast(`历史会话清理失败：${err instanceof Error ? err.message : String(err)}`, 'error')
+          })
+          return normalized
+        }))
         setConversations(loaded)
 
         const latest = loaded[0]
