@@ -75,6 +75,8 @@ export interface TaskRecord {
   inputImageIds: string[]
   /** 输出图片的 image store id 列表 */
   outputImages: string[]
+  /** Responses 流式预览图的 image store id 列表 */
+  previewImages?: string[]
   status: TaskStatus
   error: string | null
   createdAt: number

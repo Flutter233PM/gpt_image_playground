@@ -16,6 +16,7 @@ export default function DetailModal() {
   const [imageSrcs, setImageSrcs] = useState<Record<string, string>>({})
   const [imageRatios, setImageRatios] = useState<Record<string, string>>({})
   const [imageSizes, setImageSizes] = useState<Record<string, string>>({})
+  const [imageGroup, setImageGroup] = useState<'final' | 'preview'>('final')
   const imagePanelRef = useRef<HTMLDivElement>(null)
   const mainImageRef = useRef<HTMLImageElement>(null)
   const [imageLabelLeft, setImageLabelLeft] = useState(8)
@@ -30,12 +31,21 @@ export default function DetailModal() {
   // Reset index when task changes
   useEffect(() => {
     setImageIndex(0)
+    setImageGroup('final')
   }, [detailTaskId])
+
+  useEffect(() => {
+    if (!task) return
+    if (imageGroup === 'preview' && !(task.previewImages?.length)) {
+      setImageGroup('final')
+      setImageIndex(0)
+    }
+  }, [imageGroup, task])
 
   // 加载所有相关图片
   useEffect(() => {
     if (!task) return
-    const ids = [...(task.outputImages || []), ...(task.inputImageIds || [])]
+    const ids = [...(task.outputImages || []), ...(task.previewImages || []), ...(task.inputImageIds || [])]
     for (const id of ids) {
       const cached = getCachedImage(id)
       if (cached) {
@@ -48,7 +58,10 @@ export default function DetailModal() {
     }
   }, [task])
 
-  const currentOutputImageId = task?.outputImages?.[imageIndex] || ''
+  const currentImageIds = imageGroup === 'preview'
+    ? task?.previewImages ?? []
+    : task?.outputImages ?? []
+  const currentOutputImageId = currentImageIds[imageIndex] || ''
   const currentOutputImageSrc = currentOutputImageId ? imageSrcs[currentOutputImageId] || '' : ''
 
   useEffect(() => {
@@ -103,7 +116,9 @@ export default function DetailModal() {
 
   if (!task) return null
 
-  const outputLen = task.outputImages?.length || 0
+  const finalOutputLen = task.outputImages?.length || 0
+  const previewOutputLen = task.previewImages?.length || 0
+  const outputLen = currentImageIds.length
   const currentImageRatio = currentOutputImageId ? imageRatios[currentOutputImageId] : ''
   const currentImageSize = currentOutputImageId ? imageSizes[currentOutputImageId] : ''
 
@@ -214,7 +229,7 @@ export default function DetailModal() {
                   setImageLabelLeft(Math.max(8, imageRect.left - panelRect.left))
                 }}
                 onClick={() =>
-                  setLightboxImageId(task.outputImages[imageIndex], task.outputImages)
+                  setLightboxImageId(currentImageIds[imageIndex], currentImageIds)
                 }
                 alt=""
               />
@@ -239,6 +254,30 @@ export default function DetailModal() {
                   )
                 )}
               </div>
+              {previewOutputLen > 0 && (
+                <div className="absolute right-3 top-3 flex rounded-lg bg-black/45 p-0.5 text-xs text-white backdrop-blur-sm">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setImageGroup('final')
+                      setImageIndex(0)
+                    }}
+                    className={`rounded-md px-2 py-1 transition-colors ${imageGroup === 'final' ? 'bg-white text-gray-900' : 'hover:bg-white/15'}`}
+                  >
+                    最终 {finalOutputLen}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setImageGroup('preview')
+                      setImageIndex(0)
+                    }}
+                    className={`rounded-md px-2 py-1 transition-colors ${imageGroup === 'preview' ? 'bg-white text-gray-900' : 'hover:bg-white/15'}`}
+                  >
+                    预览 {previewOutputLen}
+                  </button>
+                </div>
+              )}
               {outputLen > 1 && (
                 <>
                   <button
@@ -432,7 +471,7 @@ export default function DetailModal() {
             </button>
             <button
               onClick={handleEdit}
-              disabled={!outputLen}
+              disabled={!finalOutputLen}
               className="flex-1 flex items-center justify-center gap-1.5 px-2 sm:px-3 py-2 rounded-lg bg-green-50 dark:bg-green-500/10 text-green-600 dark:text-green-400 hover:bg-green-100 dark:hover:bg-green-500/20 disabled:opacity-40 disabled:cursor-not-allowed transition text-xs sm:text-sm font-medium whitespace-nowrap"
             >
               <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">

@@ -197,6 +197,7 @@ export async function initStore() {
   for (const t of tasks) {
     for (const id of t.inputImageIds || []) referencedIds.add(id)
     for (const id of t.outputImages || []) referencedIds.add(id)
+    for (const id of t.previewImages || []) referencedIds.add(id)
   }
 
   // 预加载所有图片到缓存，同时清理孤立图片
@@ -386,6 +387,7 @@ export async function removeTasks(tasksToRemove: TaskRecord[]) {
     if (!existingRemoveIds.has(task.id)) continue
     for (const id of task.inputImageIds || []) taskImageIds.add(id)
     for (const id of task.outputImages || []) taskImageIds.add(id)
+    for (const id of task.previewImages || []) taskImageIds.add(id)
   }
 
   // 从列表移除
@@ -398,6 +400,7 @@ export async function removeTasks(tasksToRemove: TaskRecord[]) {
   for (const task of remaining) {
     for (const id of task.inputImageIds || []) stillUsed.add(id)
     for (const id of task.outputImages || []) stillUsed.add(id)
+    for (const id of task.previewImages || []) stillUsed.add(id)
   }
   for (const img of inputImages) stillUsed.add(img.id)
 
@@ -464,7 +467,7 @@ export async function exportData() {
     const imageCreatedAtFallback = new Map<string, number>()
 
     for (const task of tasks) {
-      for (const id of [...(task.inputImageIds || []), ...(task.outputImages || [])]) {
+      for (const id of [...(task.inputImageIds || []), ...(task.outputImages || []), ...(task.previewImages || [])]) {
         const prev = imageCreatedAtFallback.get(id)
         if (prev == null || task.createdAt < prev) {
           imageCreatedAtFallback.set(id, task.createdAt)

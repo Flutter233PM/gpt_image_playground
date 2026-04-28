@@ -100,6 +100,11 @@ interface PersistConversationOptions {
   activate?: boolean
 }
 
+interface ResponseOutputLightboxState {
+  outputs: StoredResponseChatMessage['outputs']
+  index: number
+}
+
 function isHttpStreamRetryableError(message: string): boolean {
   const normalized = message.toLowerCase()
   return (
@@ -274,17 +279,62 @@ function getVisibleResponseOutputs(result: CallResponsesImageApiResult): StoredR
   return [...result.images, ...result.partialImages]
 }
 
-function getResponseOutputCaption(
-  outputs: StoredResponseChatMessage['outputs'],
-  item: StoredResponseChatMessage['outputs'][number],
-  index: number,
-): string {
-  const position = outputs
-    .slice(0, index + 1)
-    .filter((output) => Boolean(output.partial) === Boolean(item.partial))
-    .length
+function splitResponseOutputs(outputs: StoredResponseChatMessage['outputs']) {
+  return {
+    images: outputs.filter((item) => !item.partial),
+    previews: outputs.filter((item) => item.partial),
+  }
+}
 
-  return `${item.partial ? '预览' : '图片'} ${position}`
+function getResponseOutputCaption(item: StoredResponseChatMessage['outputs'][number], index: number): string {
+  return `${item.partial ? '预览' : '图片'} ${index + 1}`
+}
+
+function ResponseOutputGroup({
+  title,
+  outputs,
+  outputFormat,
+  onOpen,
+}: {
+  title: string
+  outputs: StoredResponseChatMessage['outputs']
+  outputFormat: ResponsesImageToolOptions['output_format']
+  onOpen: (outputs: StoredResponseChatMessage['outputs'], index: number) => void
+}) {
+  if (!outputs.length) return null
+
+  return (
+    <section className="mt-3">
+      <div className="mb-2 flex items-center justify-between text-xs text-gray-500 dark:text-gray-400">
+        <span>{title}</span>
+        <span>{outputs.length}</span>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2">
+        {outputs.map((item, index) => (
+          <figure key={`${title}-${item.callId ?? 'image'}-${index}`} className="overflow-hidden rounded-lg border border-gray-200 bg-gray-50 dark:border-white/[0.08] dark:bg-gray-900">
+            <button
+              type="button"
+              onClick={() => onOpen(outputs, index)}
+              className="block w-full cursor-zoom-in bg-white text-left transition-opacity hover:opacity-90 dark:bg-gray-950"
+              aria-label={`查看${getResponseOutputCaption(item, index)}`}
+            >
+              <img src={item.image} alt={`生成结果 ${index + 1}`} className="aspect-square w-full object-contain" />
+            </button>
+            <figcaption className="flex items-center justify-between border-t border-gray-200 px-2 py-1.5 text-xs text-gray-500 dark:border-white/[0.08] dark:text-gray-400">
+              <span>{getResponseOutputCaption(item, index)}</span>
+              <a
+                href={item.image}
+                download={`responses-image-${index + 1}.${outputFormat}`}
+                className="font-medium text-blue-600 transition-colors hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300"
+              >
+                下载
+              </a>
+            </figcaption>
+          </figure>
+        ))}
+      </div>
+    </section>
+  )
 }
 
 function uniqueDataUrls(values: string[]): string[] {
@@ -324,6 +374,7 @@ async function createImageApiTaskFromResponsesResult(
   inputImages: StoredResponseReferenceImage[],
   toolOptions: ResponsesImageToolOptions,
   outputImages: Array<{ image: string }>,
+  previewImages: Array<{ image: string }>,
   startedAt: number,
 ): Promise<TaskRecord | null> {
   if (!outputImages.length) return null
@@ -336,6 +387,11 @@ async function createImageApiTaskFromResponsesResult(
   const outputImageIds: string[] = []
   for (const image of outputImages) {
     outputImageIds.push(await storeImage(image.image, 'generated'))
+  }
+
+  const previewImageIds: string[] = []
+  for (const image of previewImages) {
+    previewImageIds.push(await storeImage(image.image, 'generated'))
   }
 
   return {
@@ -354,6 +410,7 @@ async function createImageApiTaskFromResponsesResult(
     },
     inputImageIds,
     outputImages: outputImageIds,
+    previewImages: previewImageIds,
     status: 'done',
     error: null,
     createdAt: startedAt,
@@ -386,6 +443,7 @@ export default function ResponsesPage() {
   const [transportMode, setTransportMode] = useState<ResponsesTransportMode>('auto')
   const [runningConversationIds, setRunningConversationIds] = useState<Set<string>>(() => new Set())
   const [showSizePicker, setShowSizePicker] = useState(false)
+  const [responseLightbox, setResponseLightbox] = useState<ResponseOutputLightboxState | null>(null)
 
   const canUseCompression = toolOptions.output_format !== 'png'
   const compressionValue = toolOptions.output_compression ?? 80
@@ -452,6 +510,48 @@ export default function ResponsesPage() {
   useEffect(() => {
     runningConversationIdsRef.current = runningConversationIds
   }, [runningConversationIds])
+
+  const closeResponseLightbox = () => setResponseLightbox(null)
+  const showPreviousResponseOutput = () => {
+    setResponseLightbox((current) => {
+      if (!current?.outputs.length) return current
+      return {
+        ...current,
+        index: (current.index - 1 + current.outputs.length) % current.outputs.length,
+      }
+    })
+  }
+  const showNextResponseOutput = () => {
+    setResponseLightbox((current) => {
+      if (!current?.outputs.length) return current
+      return {
+        ...current,
+        index: (current.index + 1) % current.outputs.length,
+      }
+    })
+  }
+
+  useEffect(() => {
+    if (!responseLightbox) return
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        closeResponseLightbox()
+      }
+      if (event.key === 'ArrowLeft') {
+        event.preventDefault()
+        showPreviousResponseOutput()
+      }
+      if (event.key === 'ArrowRight') {
+        event.preventDefault()
+        showNextResponseOutput()
+      }
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [responseLightbox])
 
   const markConversationRunning = (conversationId: string) => {
     setRunningConversationIds((current) => {
@@ -805,6 +905,7 @@ export default function ResponsesPage() {
             inputImages,
             toolOptions,
             result.images,
+            result.partialImages,
             startedAt,
           )
           if (!imageApiTask) throw new Error('没有可同步的图片')
@@ -898,6 +999,9 @@ export default function ResponsesPage() {
     }
   }
 
+  const responseLightboxOutput = responseLightbox?.outputs[responseLightbox.index]
+  const responseLightboxTotal = responseLightbox?.outputs.length ?? 0
+
   return (
     <>
       {showSizePicker && (
@@ -906,6 +1010,64 @@ export default function ResponsesPage() {
           onSelect={(size) => updateToolOptions({ size })}
           onClose={() => setShowSizePicker(false)}
         />
+      )}
+
+      {responseLightbox && responseLightboxOutput && (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-4"
+          onClick={closeResponseLightbox}
+        >
+          <button
+            type="button"
+            onClick={closeResponseLightbox}
+            className="absolute right-4 top-4 inline-flex h-9 w-9 items-center justify-center rounded-lg bg-black/50 text-white transition-colors hover:bg-black/70"
+            aria-label="关闭大图"
+          >
+            <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+          {responseLightboxTotal > 1 && (
+            <>
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation()
+                  showPreviousResponseOutput()
+                }}
+                className="absolute left-4 top-1/2 inline-flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-lg bg-black/50 text-white transition-colors hover:bg-black/70"
+                aria-label="上一张"
+              >
+                <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation()
+                  showNextResponseOutput()
+                }}
+                className="absolute right-4 top-1/2 inline-flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-lg bg-black/50 text-white transition-colors hover:bg-black/70"
+                aria-label="下一张"
+              >
+                <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                </svg>
+              </button>
+            </>
+          )}
+          <div className="flex max-h-full max-w-full flex-col items-center gap-3" onClick={(event) => event.stopPropagation()}>
+            <img
+              src={responseLightboxOutput.image}
+              alt=""
+              className="max-h-[calc(100vh-6rem)] max-w-[calc(100vw-3rem)] object-contain"
+            />
+            <div className="rounded-lg bg-black/50 px-3 py-1.5 text-xs text-white">
+              {responseLightboxOutput.partial ? '预览' : '图片'} {responseLightbox.index + 1} / {responseLightboxTotal}
+            </div>
+          </div>
+        </div>
       )}
 
       <div className="grid h-[calc(100vh-56px)] min-h-[680px] gap-4 py-4 lg:grid-cols-[240px_minmax(0,1fr)_320px]">
@@ -1052,25 +1214,26 @@ export default function ResponsesPage() {
                       </p>
                     ))}
 
-                    {message.outputs.length > 0 && (
-                      <div className="mt-2 grid gap-3 sm:grid-cols-2">
-                        {message.outputs.map((item, index) => (
-                          <figure key={`${item.callId ?? 'image'}-${index}`} className="overflow-hidden rounded-lg border border-gray-200 bg-gray-50 dark:border-white/[0.08] dark:bg-gray-900">
-                            <img src={item.image} alt={`生成结果 ${index + 1}`} className="aspect-square w-full object-contain" />
-                            <figcaption className="flex items-center justify-between border-t border-gray-200 px-2 py-1.5 text-xs text-gray-500 dark:border-white/[0.08] dark:text-gray-400">
-                              <span>{getResponseOutputCaption(message.outputs, item, index)}</span>
-                              <a
-                                href={item.image}
-                                download={`responses-image-${index + 1}.${toolOptions.output_format}`}
-                                className="font-medium text-blue-600 transition-colors hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300"
-                              >
-                                下载
-                              </a>
-                            </figcaption>
-                          </figure>
-                        ))}
-                      </div>
-                    )}
+                    {message.outputs.length > 0 && (() => {
+                      const grouped = splitResponseOutputs(message.outputs)
+
+                      return (
+                        <>
+                          <ResponseOutputGroup
+                            title="最终图"
+                            outputs={grouped.images}
+                            outputFormat={toolOptions.output_format}
+                            onOpen={(outputs, index) => setResponseLightbox({ outputs, index })}
+                          />
+                          <ResponseOutputGroup
+                            title="流式预览"
+                            outputs={grouped.previews}
+                            outputFormat={toolOptions.output_format}
+                            onOpen={(outputs, index) => setResponseLightbox({ outputs, index })}
+                          />
+                        </>
+                      )
+                    })()}
 
                     {message.revisedPrompts.length > 0 && (
                       <details className="mt-2">
