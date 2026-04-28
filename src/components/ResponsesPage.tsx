@@ -4,14 +4,15 @@ import type {
   ResponsesContextMode,
   ResponsesImageToolOptions,
   ResponsesReasoningEffort,
+  ResponsesTransportMode,
   StoredResponseChatMessage,
   StoredResponseConversation,
   StoredResponseReferenceImage,
   TaskRecord,
 } from '../types'
 import { DEFAULT_PARAMS } from '../types'
-import { callResponsesImageApi, callResponsesImageApiWebSocket } from '../lib/api'
-import type { CallResponsesImageApiResult } from '../lib/api'
+import { callResponsesImageApi, callResponsesImageApiStream, callResponsesImageApiWebSocket } from '../lib/api'
+import type { CallResponsesImageApiResult, ResponsesImageApiProgressEvent } from '../lib/api'
 import {
   deleteResponseConversation,
   getAllResponseConversations,
@@ -34,6 +35,7 @@ const DEFAULT_TOOL_OPTIONS: ResponsesImageToolOptions = {
   output_format: 'png',
   output_compression: null,
   moderation: 'auto',
+  partial_images: 0,
 }
 
 const ACTION_OPTIONS = [
@@ -77,6 +79,20 @@ const CONTEXT_MODE_OPTIONS = [
   { label: '响应 ID 接续', value: 'previous_response_id' },
 ]
 
+const TRANSPORT_MODE_OPTIONS = [
+  { label: '自动：HTTP 流式优先', value: 'auto' },
+  { label: 'HTTP 流式', value: 'http_stream' },
+  { label: 'WebSocket v2', value: 'websocket' },
+  { label: 'HTTP JSON', value: 'http_json' },
+]
+
+const PARTIAL_IMAGE_OPTIONS = [
+  { label: '关闭', value: 0 },
+  { label: '1 张预览', value: 1 },
+  { label: '2 张预览', value: 2 },
+  { label: '3 张预览', value: 3 },
+]
+
 interface ResponsesErrorDisplay {
   summary: string
   detail?: string
@@ -95,8 +111,15 @@ function isContinuationUnavailableError(message: string): boolean {
   )
 }
 
-function isWebSocketAbnormalCloseError(message: string): boolean {
-  return message.includes('1006') || message.toLowerCase().includes('websocket 异常断开')
+function isHttpStreamRetryableError(message: string): boolean {
+  const normalized = message.toLowerCase()
+  return (
+    normalized.includes('http 流式响应不可读取')
+    || normalized.includes('networkerror')
+    || normalized.includes('failed to fetch')
+    || normalized.includes('body stream already read')
+    || normalized.includes('unexpected end')
+  )
 }
 
 function extractOpenAIRequestId(message: string): string {
@@ -118,6 +141,44 @@ function getResponsesErrorDisplay(message: string): ResponsesErrorDisplay {
   }
 
   return { summary: message, requestId }
+}
+
+function getTransportLabel(transport: ResponsesTransportMode | CallResponsesImageApiResult['transport']): string {
+  switch (transport) {
+    case 'http_stream':
+      return 'HTTP 流式'
+    case 'websocket':
+      return 'WebSocket v2'
+    case 'http_json':
+      return 'HTTP JSON'
+    default:
+      return '自动'
+  }
+}
+
+function getProgressText(event: ResponsesImageApiProgressEvent): string {
+  const transport = getTransportLabel(event.transport)
+
+  switch (event.phase) {
+    case 'connecting':
+      return event.message || `${transport} 连接中`
+    case 'created':
+      return `${transport} 已创建响应`
+    case 'in_progress':
+      return `${transport} 生成中`
+    case 'text':
+      return `${transport} 正在返回文本`
+    case 'partial_image':
+      return `${transport} 收到预览图`
+    case 'output_item':
+      return `${transport} 收到输出项`
+    case 'fallback':
+      return event.message || `${transport} 已切换传输`
+    case 'completed':
+      return `${transport} 已完成`
+    default:
+      return `${transport} 请求中`
+  }
 }
 
 function genId(): string {
@@ -346,6 +407,7 @@ export default function ResponsesPage() {
   const [conversations, setConversations] = useState<StoredResponseConversation[]>([])
   const [activeConversationId, setActiveConversationId] = useState('')
   const [contextMode, setContextMode] = useState<ResponsesContextMode>('auto')
+  const [transportMode, setTransportMode] = useState<ResponsesTransportMode>('auto')
   const [runningConversationIds, setRunningConversationIds] = useState<Set<string>>(() => new Set())
   const [showSizePicker, setShowSizePicker] = useState(false)
 
@@ -374,7 +436,7 @@ export default function ResponsesPage() {
     if (shouldSendPreviousResponseId && conversationResponseId) return '响应 ID 接续'
     if (shouldSendImageContext) return hasLatestImageContext ? '图片上下文接续' : '无可用图片上下文'
     if (conversationResponseId) return '未发送上下文'
-    return 'WS v2 新对话'
+    return `${getTransportLabel(transportMode)} 新对话`
   }, [
     conversationResponseId,
     hasLatestImageContext,
@@ -382,6 +444,7 @@ export default function ResponsesPage() {
     runningConversationCount,
     shouldSendImageContext,
     shouldSendPreviousResponseId,
+    transportMode,
   ])
   const contextPreviewText = useMemo(() => {
     if (shouldSendPreviousResponseId) {
@@ -634,6 +697,12 @@ export default function ResponsesPage() {
       previousResponseId,
       contextItemRefs,
       imageGenerationCallIds,
+      transport: transportMode === 'websocket'
+        ? 'websocket'
+        : transportMode === 'http_json'
+          ? 'http_json'
+          : 'http_stream',
+      progress: `${getTransportLabel(transportMode)} 等待响应`,
       status: 'running',
       createdAt: startedAt,
     }
@@ -647,41 +716,89 @@ export default function ResponsesPage() {
     scrollToBottom()
 
     try {
+      const inputImageDataUrls = inputImages.map((image) => image.dataUrl)
       let usedPreviousResponseId = previousResponseId
       let usedContextItemRefs = contextItemRefs
       let usedImageGenerationCallIds = imageGenerationCallIds
       let retriedWithTranscriptContext = false
       let retriedWithImageContext = false
-      let retriedWithHttp = false
+      let retriedWithTransportFallback = false
       let result: CallResponsesImageApiResult
 
-      try {
-        result = await callResponsesImageApiWebSocket({
+      const updateAssistantProgress = (event: ResponsesImageApiProgressEvent) => {
+        const progress = getProgressText(event)
+        if (activeConversationIdRef.current !== conversationId) return
+
+        setMessages((current) => current.map((message) => (
+          message.id === assistantId
+            ? {
+                ...message,
+                transport: event.transport,
+                progress,
+                responseId: event.responseId ?? message.responseId,
+                texts: event.text ? [{ text: event.text }] : message.texts,
+                outputs: event.images?.length ? event.images : message.outputs,
+              }
+            : message
+        )))
+        if (event.phase === 'partial_image' || event.phase === 'text') {
+          scrollToBottom()
+        }
+      }
+
+      const callWithTransport = async (
+        nextPrompt: string,
+        nextPreviousResponseId: string,
+        nextContextItemRefs: ResponsesContextItemRef[],
+      ) => {
+        const requestOptions = {
           settings,
           model: trimmedModel,
-          prompt: trimmedPrompt,
-          previousResponseId,
-          contextItemRefs,
+          prompt: nextPrompt,
+          previousResponseId: nextPreviousResponseId,
+          contextItemRefs: nextContextItemRefs,
           reasoningEffort,
           toolOptions,
-          inputImageDataUrls: inputImages.map((image) => image.dataUrl),
-        })
+          inputImageDataUrls,
+          onProgress: updateAssistantProgress,
+        }
+
+        if (transportMode === 'websocket') {
+          return callResponsesImageApiWebSocket(requestOptions)
+        }
+
+        if (transportMode === 'http_json') {
+          return callResponsesImageApi(requestOptions)
+        }
+
+        if (transportMode === 'http_stream') {
+          return callResponsesImageApiStream(requestOptions)
+        }
+
+        try {
+          return await callResponsesImageApiStream(requestOptions)
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          if (isContinuationUnavailableError(message) || !isHttpStreamRetryableError(message)) {
+            throw err
+          }
+
+          retriedWithTransportFallback = true
+          updateAssistantProgress({
+            transport: 'http_json',
+            phase: 'fallback',
+            message: 'HTTP 流式不可用，已改用 HTTP JSON',
+          })
+          return callResponsesImageApi(requestOptions)
+        }
+      }
+
+      try {
+        result = await callWithTransport(trimmedPrompt, previousResponseId, contextItemRefs)
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         const canRetryWithoutContext = toolOptions.action !== 'edit' || inputImages.length > 0
-        if (isWebSocketAbnormalCloseError(message)) {
-          retriedWithHttp = true
-          result = await callResponsesImageApi({
-            settings,
-            model: trimmedModel,
-            prompt: trimmedPrompt,
-            previousResponseId,
-            contextItemRefs,
-            reasoningEffort,
-            toolOptions,
-            inputImageDataUrls: inputImages.map((image) => image.dataUrl),
-          })
-        } else if (!previousResponseId || !isContinuationUnavailableError(message)) {
+        if (!previousResponseId || !isContinuationUnavailableError(message)) {
           throw err
         } else if (fallbackImageContextItemRefs.length) {
           const fallbackPrompt = buildContinuationFallbackPrompt(messages, trimmedPrompt)
@@ -689,16 +806,7 @@ export default function ResponsesPage() {
           usedContextItemRefs = fallbackImageContextItemRefs
           usedImageGenerationCallIds = getImageGenerationCallIdsFromContextRefs(fallbackImageContextItemRefs)
           retriedWithImageContext = true
-          result = await callResponsesImageApiWebSocket({
-            settings,
-            model: trimmedModel,
-            prompt: fallbackPrompt,
-            previousResponseId: '',
-            contextItemRefs: fallbackImageContextItemRefs,
-            reasoningEffort,
-            toolOptions,
-            inputImageDataUrls: inputImages.map((image) => image.dataUrl),
-          })
+          result = await callWithTransport(fallbackPrompt, '', fallbackImageContextItemRefs)
         } else if (!canRetryWithoutContext) {
           throw err
         } else {
@@ -707,16 +815,7 @@ export default function ResponsesPage() {
           usedContextItemRefs = []
           usedImageGenerationCallIds = []
           retriedWithTranscriptContext = fallbackPrompt !== trimmedPrompt
-          result = await callResponsesImageApiWebSocket({
-            settings,
-            model: trimmedModel,
-            prompt: fallbackPrompt,
-            previousResponseId: '',
-            contextItemRefs: [],
-            reasoningEffort,
-            toolOptions,
-            inputImageDataUrls: inputImages.map((image) => image.dataUrl),
-          })
+          result = await callWithTransport(fallbackPrompt, '', [])
         }
       }
 
@@ -735,6 +834,8 @@ export default function ResponsesPage() {
               texts: result.texts,
               revisedPrompts,
               responseId: nextResponseId,
+              transport: result.transport,
+              progress: undefined,
               status: 'done' as const,
               elapsed: Date.now() - startedAt,
             }
@@ -775,8 +876,8 @@ export default function ResponsesPage() {
       showToast(
         result.images.length > 0
           ? `Responses API 返回 ${result.images.length} 张图片${syncedToImageApi ? '，已同步到 Image API' : imageApiSyncFailed ? '，同步到 Image API 失败' : ''}`
-          : retriedWithHttp
-            ? 'WebSocket 断开，已用 HTTP Responses 重试完成'
+          : retriedWithTransportFallback
+            ? 'HTTP 流式不可用，已用 HTTP JSON 完成'
           : retriedWithImageContext
             ? '响应 ID 接续失败，已用图片上下文接续完成'
           : retriedWithTranscriptContext
@@ -938,7 +1039,7 @@ export default function ResponsesPage() {
                 Responses 对话生图
               </h2>
               <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
-                使用 sub2api Responses WebSocket v2，自动选择图片上下文或响应 ID 接续。
+                走 /v1/responses，保存 response.id 后用 previous_response_id 接续。
               </p>
             </div>
             <span className="hidden rounded-lg border border-gray-200 px-2 py-1 text-xs text-gray-500 dark:border-white/[0.08] dark:text-gray-400 sm:inline">
@@ -972,7 +1073,14 @@ export default function ResponsesPage() {
                   >
                     <div className="mb-1 flex items-center justify-between gap-3 text-xs text-gray-500 dark:text-gray-400">
                       <span>{message.role === 'user' ? '你' : 'Responses'}</span>
-                      {message.status === 'running' && <span>生成中...</span>}
+                      {message.status === 'running' && (
+                        <span className="min-w-0 truncate">
+                          {message.progress || '生成中...'}
+                        </span>
+                      )}
+                      {message.transport && message.status !== 'running' && (
+                        <span>{getTransportLabel(message.transport)}</span>
+                      )}
                       {message.elapsed != null && <span>{formatElapsed(message.elapsed)}</span>}
                     </div>
 
@@ -1005,7 +1113,7 @@ export default function ResponsesPage() {
                           <figure key={`${item.callId ?? 'image'}-${index}`} className="overflow-hidden rounded-lg border border-gray-200 bg-gray-50 dark:border-white/[0.08] dark:bg-gray-900">
                             <img src={item.image} alt={`生成结果 ${index + 1}`} className="aspect-square w-full object-contain" />
                             <figcaption className="flex items-center justify-between border-t border-gray-200 px-2 py-1.5 text-xs text-gray-500 dark:border-white/[0.08] dark:text-gray-400">
-                              <span>图片 {index + 1}</span>
+                              <span>{item.partial ? '预览' : '图片'} {index + 1}</span>
                               <a
                                 href={item.image}
                                 download={`responses-image-${index + 1}.${toolOptions.output_format}`}
@@ -1171,7 +1279,7 @@ export default function ResponsesPage() {
           <div>
             <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">请求参数</h3>
             <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              自动混合优先使用响应 ID，响应接续不可用时回退到图片上下文。
+              自动上下文优先使用响应 ID；自动传输优先使用 HTTP 流式。
             </p>
           </div>
 
@@ -1201,6 +1309,16 @@ export default function ResponsesPage() {
               value={contextMode}
               onChange={(value) => setContextMode(value as ResponsesContextMode)}
               options={CONTEXT_MODE_OPTIONS}
+              className="rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-sm text-gray-900 transition hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500/20 dark:border-white/[0.08] dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-white/[0.06]"
+            />
+          </label>
+
+          <label className="block">
+            <span className="mb-1.5 block text-xs font-medium text-gray-600 dark:text-gray-300">传输</span>
+            <Select
+              value={transportMode}
+              onChange={(value) => setTransportMode(value as ResponsesTransportMode)}
+              options={TRANSPORT_MODE_OPTIONS}
               className="rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-sm text-gray-900 transition hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500/20 dark:border-white/[0.08] dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-white/[0.06]"
             />
           </label>
@@ -1279,6 +1397,17 @@ export default function ResponsesPage() {
               />
             </label>
           </div>
+
+          <label className="block">
+            <span className="mb-1.5 block text-xs font-medium text-gray-600 dark:text-gray-300">流式预览图</span>
+            <Select
+              value={toolOptions.partial_images ?? 0}
+              onChange={(value) => updateToolOptions({ partial_images: value as 0 | 1 | 2 | 3 })}
+              options={PARTIAL_IMAGE_OPTIONS}
+              disabled={transportMode === 'http_json'}
+              className="rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-sm text-gray-900 transition hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500/20 dark:border-white/[0.08] dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-white/[0.06]"
+            />
+          </label>
 
           <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 dark:border-white/[0.08] dark:bg-gray-950">
             <div className="text-xs font-medium text-gray-600 dark:text-gray-300">当前上下文</div>

@@ -2,6 +2,7 @@ import type {
   AppSettings,
   ImageApiResponse,
   ResponsesApiTextOutput,
+  ResponsesActualTransport,
   ResponsesContextItemRef,
   ResponsesImageOutput,
   ResponsesImageToolOptions,
@@ -75,12 +76,23 @@ export interface CallResponsesImageApiOptions {
   reasoningEffort: ResponsesReasoningEffort
   toolOptions: ResponsesImageToolOptions
   inputImageDataUrls: string[]
+  onProgress?: (event: ResponsesImageApiProgressEvent) => void
 }
 
 export interface CallResponsesImageApiResult {
   responseId?: string
   images: ResponsesImageOutput[]
   texts: ResponsesApiTextOutput[]
+  transport: ResponsesActualTransport
+}
+
+export interface ResponsesImageApiProgressEvent {
+  transport: ResponsesActualTransport
+  phase: 'connecting' | 'created' | 'in_progress' | 'text' | 'partial_image' | 'output_item' | 'completed' | 'fallback'
+  responseId?: string
+  text?: string
+  images?: ResponsesImageOutput[]
+  message?: string
 }
 
 interface ResponsesApiContentItem {
@@ -117,6 +129,10 @@ interface ResponsesOutputParseState {
 interface ResponsesWebSocketEvent {
   type?: string
   id?: string
+  item_id?: string
+  output_item_id?: string
+  partial_image_b64?: string
+  partial_image_index?: number
   response?: ResponsesApiResponse & {
     error?: {
       message?: string
@@ -298,7 +314,10 @@ function buildResponsesContextInputItem(item: ResponsesContextItemRef): Record<s
   return { type: 'image_generation_call', id: item.id }
 }
 
-function buildResponsesImagePayload(opts: CallResponsesImageApiOptions): ResponsesImagePayloadBuildResult {
+function buildResponsesImagePayload(
+  opts: CallResponsesImageApiOptions,
+  enablePartialImages = false,
+): ResponsesImagePayloadBuildResult {
   const {
     model,
     prompt,
@@ -321,6 +340,9 @@ function buildResponsesImagePayload(opts: CallResponsesImageApiOptions): Respons
     tool.output_compression = toolOptions.output_compression
   }
   tool.moderation = toolOptions.moderation
+  if (enablePartialImages && toolOptions.partial_images) {
+    tool.partial_images = toolOptions.partial_images
+  }
 
   const content: Array<Record<string, string>> = []
   const trimmedPrompt = prompt.trim()
@@ -357,7 +379,11 @@ function buildResponsesImagePayload(opts: CallResponsesImageApiOptions): Respons
   return { body, mime }
 }
 
-function parseResponsesOutput(payload: ResponsesApiResponse, mime: string): CallResponsesImageApiResult {
+function parseResponsesOutput(
+  payload: ResponsesApiResponse,
+  mime: string,
+  transport: ResponsesActualTransport,
+): CallResponsesImageApiResult {
   const images: ResponsesImageOutput[] = []
   const texts: ResponsesApiTextOutput[] = []
   const state: ResponsesOutputParseState = {}
@@ -370,6 +396,7 @@ function parseResponsesOutput(payload: ResponsesApiResponse, mime: string): Call
     responseId: payload.id,
     images,
     texts,
+    transport,
   }
 }
 
@@ -434,6 +461,163 @@ function readResponsesWebSocketCloseError(event: CloseEvent): string {
 
   const reason = event.reason ? `：${event.reason}` : ''
   return `Responses WebSocket 已关闭（${event.code}）${reason}`
+}
+
+function readPartialImageIndex(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined
+  return Math.max(0, Math.trunc(value))
+}
+
+function getPartialImageOutput(
+  event: ResponsesWebSocketEvent,
+  mime: string,
+): ResponsesImageOutput | null {
+  if (!event.partial_image_b64) return null
+
+  const callId = event.item_id?.trim() || event.output_item_id?.trim() || event.id?.trim()
+  return {
+    image: normalizeBase64Image(event.partial_image_b64, mime),
+    callId,
+    partial: true,
+    partialIndex: readPartialImageIndex(event.partial_image_index),
+  }
+}
+
+function upsertImageOutput(images: ResponsesImageOutput[], nextImage: ResponsesImageOutput): ResponsesImageOutput[] {
+  const next = [...images]
+  const existingIndex = next.findIndex((image) => {
+    if (nextImage.callId && image.callId === nextImage.callId) return true
+    if (nextImage.partialIndex != null && image.partialIndex === nextImage.partialIndex) return true
+    return image.image === nextImage.image
+  })
+
+  if (existingIndex >= 0) {
+    next[existingIndex] = {
+      ...next[existingIndex],
+      ...nextImage,
+    }
+    return next
+  }
+
+  next.push(nextImage)
+  return next
+}
+
+function createResponsesStreamCollector(
+  mime: string,
+  transport: ResponsesActualTransport,
+  onProgress?: (event: ResponsesImageApiProgressEvent) => void,
+) {
+  let responseId = ''
+  let textBuffer = ''
+  let partialImages: ResponsesImageOutput[] = []
+  const images: ResponsesImageOutput[] = []
+  const texts: ResponsesApiTextOutput[] = []
+  const outputState: ResponsesOutputParseState = {}
+
+  const publish = (event: Omit<ResponsesImageApiProgressEvent, 'transport'>) => {
+    onProgress?.({ transport, responseId: (event.responseId ?? responseId) || undefined, ...event })
+  }
+
+  const finish = (payload?: ResponsesApiResponse): CallResponsesImageApiResult => {
+    const parsed = payload ? parseResponsesOutput(payload, mime, transport) : undefined
+    const finalImages = parsed?.images.length ? parsed.images : images.length ? images : partialImages
+    const finalTexts = parsed?.texts.length ? parsed.texts : texts
+    const bufferedText = textBuffer.trim()
+
+    if (!finalTexts.length && bufferedText) {
+      finalTexts.push({ text: bufferedText })
+    }
+
+    if (!finalImages.length && !finalTexts.length) {
+      throw new Error(transport === 'websocket'
+        ? 'Responses WebSocket 未返回可显示内容'
+        : 'Responses HTTP 流式请求未返回可显示内容')
+    }
+
+    const result = {
+      responseId: parsed?.responseId || responseId || undefined,
+      images: finalImages.map((image) => ({ ...image, partial: false })),
+      texts: finalTexts,
+      transport,
+    }
+    publish({ phase: 'completed', responseId: result.responseId })
+    return result
+  }
+
+  const handleEvent = (event: ResponsesWebSocketEvent): CallResponsesImageApiResult | null => {
+    const eventResponseId = event.response?.id || event.id
+    if (eventResponseId) responseId = eventResponseId
+
+    switch (event.type) {
+      case 'response.created':
+        publish({ phase: 'created' })
+        return null
+      case 'response.in_progress':
+        publish({ phase: 'in_progress' })
+        return null
+      case 'response.output_text.delta':
+        if (event.delta) {
+          textBuffer += event.delta
+          publish({ phase: 'text', text: textBuffer })
+        }
+        return null
+      case 'response.output_text.done':
+        if (event.text) {
+          texts.push({ text: event.text })
+          textBuffer = ''
+          publish({ phase: 'text', text: event.text })
+        }
+        return null
+      case 'response.image_generation_call.partial_image':
+      case 'image_generation.partial_image':
+      case 'image_edit.partial_image': {
+        const image = getPartialImageOutput(event, mime)
+        if (image) {
+          partialImages = upsertImageOutput(partialImages, image)
+          publish({ phase: 'partial_image', images: partialImages })
+        }
+        return null
+      }
+      case 'response.output_item.done':
+        if (event.item) {
+          collectResponsesOutputItem(event.item, mime, images, texts, outputState)
+          publish({ phase: 'output_item' })
+        }
+        return null
+      case 'response.completed':
+      case 'response.done':
+        return finish(event.response)
+      case 'response.failed':
+      case 'response.incomplete':
+      case 'error':
+        throw new Error(readResponsesWebSocketError(event))
+      default:
+        if (event.item) {
+          collectResponsesOutputItem(event.item, mime, images, texts, outputState)
+          publish({ phase: 'output_item' })
+        }
+        return null
+    }
+  }
+
+  return {
+    handleEvent,
+    finish,
+    hasBufferedContent: () => images.length > 0 || texts.length > 0 || partialImages.length > 0 || textBuffer.trim(),
+  }
+}
+
+function parseSseBlock(block: string): ResponsesWebSocketEvent | null {
+  const data = block
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith('data:'))
+    .map((line) => line.slice(5).trimStart())
+    .join('\n')
+    .trim()
+
+  if (!data || data === '[DONE]') return null
+  return JSON.parse(data) as ResponsesWebSocketEvent
 }
 
 export async function callImageApi(opts: CallApiOptions): Promise<CallApiResult> {
@@ -549,13 +733,101 @@ export async function callResponsesImageApi(
     }
 
     const payload = await response.json() as ResponsesApiResponse
-    const result = parseResponsesOutput(payload, mime)
+    const result = parseResponsesOutput(payload, mime, 'http_json')
 
     if (!result.images.length && !result.texts.length) {
       throw new Error('Responses API 未返回可显示内容')
     }
 
     return result
+  } finally {
+    clearTimeout(timeoutId)
+  }
+}
+
+export async function callResponsesImageApiStream(
+  opts: CallResponsesImageApiOptions,
+): Promise<CallResponsesImageApiResult> {
+  const { settings, onProgress } = opts
+  const proxyConfig = readClientDevProxyConfig()
+  const { body, mime } = buildResponsesImagePayload(opts, true)
+
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), settings.timeout * 1000)
+  const collector = createResponsesStreamCollector(mime, 'http_stream', onProgress)
+
+  onProgress?.({ transport: 'http_stream', phase: 'connecting', message: '正在建立 HTTP 流式连接' })
+
+  try {
+    const response = await fetch(buildApiUrl(settings.baseUrl, 'responses', proxyConfig), {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${settings.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      cache: 'no-store',
+      body: JSON.stringify({ ...body, stream: true }),
+      signal: controller.signal,
+    })
+
+    if (!response.ok) {
+      throw new Error(await readErrorMessage(response))
+    }
+
+    const contentType = response.headers.get('content-type') ?? ''
+    if (contentType.includes('application/json')) {
+      const payload = await response.json() as ResponsesApiResponse
+      const result = parseResponsesOutput(payload, mime, 'http_json')
+      if (!result.images.length && !result.texts.length) {
+        throw new Error('Responses API 未返回可显示内容')
+      }
+      onProgress?.({
+        transport: 'http_json',
+        phase: 'fallback',
+        responseId: result.responseId,
+        message: '上游返回 JSON，已按 HTTP JSON 解析',
+      })
+      return result
+    }
+
+    if (!response.body) {
+      throw new Error('Responses HTTP 流式响应不可读取，请改用 HTTP JSON 或检查代理是否缓冲了 SSE')
+    }
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      buffer += decoder.decode(value, { stream: true })
+
+      let separator = buffer.match(/\r?\n\r?\n/)
+      while (separator?.index != null) {
+        const block = buffer.slice(0, separator.index)
+        buffer = buffer.slice(separator.index + separator[0].length)
+        const event = parseSseBlock(block)
+        if (event) {
+          const result = collector.handleEvent(event)
+          if (result) return result
+        }
+        separator = buffer.match(/\r?\n\r?\n/)
+      }
+    }
+
+    buffer += decoder.decode()
+    const trailing = buffer.trim()
+    if (trailing) {
+      const event = parseSseBlock(trailing)
+      if (event) {
+        const result = collector.handleEvent(event)
+        if (result) return result
+      }
+    }
+
+    return collector.finish()
   } finally {
     clearTimeout(timeoutId)
   }
@@ -573,20 +845,16 @@ export async function callResponsesImageApiWebSocket(
     throw new Error('Responses WebSocket v2 需要使用同源 /v1/ 代理；请将 API URL 设为 same-origin 并配置 API_PROXY_URL')
   }
 
-  const { body, mime } = buildResponsesImagePayload(opts)
+  const { body, mime } = buildResponsesImagePayload(opts, true)
   const wsPayload = {
     type: 'response.create',
     ...body,
     stream: true,
   }
+  const collector = createResponsesStreamCollector(mime, 'websocket', opts.onProgress)
 
   return new Promise((resolve, reject) => {
     let settled = false
-    let responseId = ''
-    let textBuffer = ''
-    const images: ResponsesImageOutput[] = []
-    const texts: ResponsesApiTextOutput[] = []
-    const outputState: ResponsesOutputParseState = {}
     const timeoutId = window.setTimeout(() => {
       rejectOnce(new Error(`Responses WebSocket 请求超时（${settings.timeout}s）`))
       try {
@@ -624,60 +892,17 @@ export async function callResponsesImageApiWebSocket(
       }
     }
 
-    const finish = (payload?: ResponsesApiResponse) => {
-      const parsed = payload ? parseResponsesOutput(payload, mime) : undefined
-      const finalImages = parsed?.images.length ? parsed.images : images
-      const finalTexts = parsed?.texts.length ? parsed.texts : texts
-      const bufferedText = textBuffer.trim()
-
-      if (!finalTexts.length && bufferedText) {
-        finalTexts.push({ text: bufferedText })
-      }
-
-      if (!finalImages.length && !finalTexts.length) {
-        rejectOnce(new Error('Responses WebSocket 未返回可显示内容'))
-        return
-      }
-
-      resolveOnce({
-        responseId: parsed?.responseId || responseId || undefined,
-        images: finalImages,
-        texts: finalTexts,
-      })
-    }
-
     const handleEvent = (event: ResponsesWebSocketEvent) => {
-      const eventResponseId = event.response?.id || event.id
-      if (eventResponseId) responseId = eventResponseId
-
-      switch (event.type) {
-        case 'response.created':
-        case 'response.in_progress':
-          return
-        case 'response.output_text.delta':
-          if (event.delta) textBuffer += event.delta
-          return
-        case 'response.output_text.done':
-          if (event.text) texts.push({ text: event.text })
-          return
-        case 'response.output_item.done':
-          if (event.item) collectResponsesOutputItem(event.item, mime, images, texts, outputState)
-          return
-        case 'response.completed':
-        case 'response.done':
-          finish(event.response)
-          return
-        case 'response.failed':
-        case 'response.incomplete':
-        case 'error':
-          rejectOnce(new Error(readResponsesWebSocketError(event)))
-          return
-        default:
-          if (event.item) collectResponsesOutputItem(event.item, mime, images, texts, outputState)
+      try {
+        const result = collector.handleEvent(event)
+        if (result) resolveOnce(result)
+      } catch (err) {
+        rejectOnce(err instanceof Error ? err : new Error(String(err)))
       }
     }
 
     ws.onopen = () => {
+      opts.onProgress?.({ transport: 'websocket', phase: 'connecting', message: '正在建立 WebSocket 连接' })
       ws.send(JSON.stringify(wsPayload))
     }
 
@@ -702,9 +927,13 @@ export async function callResponsesImageApiWebSocket(
       if (settled) return
       if (
         event.code === RESPONSES_WS_ABNORMAL_CLOSE_CODE
-        && (images.length > 0 || texts.length > 0 || textBuffer.trim())
+        && collector.hasBufferedContent()
       ) {
-        finish()
+        try {
+          resolveOnce(collector.finish())
+        } catch (err) {
+          rejectOnce(err instanceof Error ? err : new Error(String(err)))
+        }
         return
       }
 

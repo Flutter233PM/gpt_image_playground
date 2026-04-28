@@ -122,6 +122,8 @@ export interface ImageApiResponse {
 
 export type ResponsesImageAction = 'auto' | 'generate' | 'edit'
 export type ResponsesContextMode = 'off' | 'auto' | 'previous_response_id' | 'image_generation_call'
+export type ResponsesTransportMode = 'auto' | 'http_stream' | 'websocket' | 'http_json'
+export type ResponsesActualTransport = 'http_stream' | 'websocket' | 'http_json'
 export type ResponsesReasoningEffort = 'default' | 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
 
 export interface ResponsesReasoningContextItemRef {
@@ -147,6 +149,7 @@ export interface ResponsesImageToolOptions {
   output_format: 'png' | 'jpeg' | 'webp'
   output_compression: number | null
   moderation: 'auto' | 'low'
+  partial_images?: 0 | 1 | 2 | 3
 }
 
 export interface ResponsesImageOutput {
@@ -155,6 +158,8 @@ export interface ResponsesImageOutput {
   callId?: string
   reasoningId?: string
   reasoning?: ResponsesReasoningContextItemRef
+  partial?: boolean
+  partialIndex?: number
 }
 
 export interface ResponsesApiTextOutput {
@@ -179,6 +184,8 @@ export interface StoredResponseChatMessage {
   previousResponseId?: string
   contextItemRefs?: ResponsesContextItemRef[]
   imageGenerationCallIds?: string[]
+  transport?: ResponsesActualTransport
+  progress?: string
   status?: 'running' | 'done' | 'error'
   error?: string | null
   elapsed?: number | null
