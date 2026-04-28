@@ -108,6 +108,10 @@ function isContinuationUnavailableError(message: string): boolean {
   return (
     normalized.includes('upstream continuation connection is unavailable')
     || normalized.includes('please restart the conversation')
+    || normalized.includes('previous_response_id is only supported on responses websocket v2')
+    || normalized.includes('responses websocket 连接失败')
+    || normalized.includes('responses websocket 已关闭')
+    || normalized.includes('responses websocket 异常断开')
   )
 }
 
@@ -751,6 +755,13 @@ export default function ResponsesPage() {
         nextPreviousResponseId: string,
         nextContextItemRefs: ResponsesContextItemRef[],
       ) => {
+        if (
+          nextPreviousResponseId
+          && (transportMode === 'http_stream' || transportMode === 'http_json')
+        ) {
+          throw new Error('previous_response_id is only supported on Responses WebSocket v2')
+        }
+
         const requestOptions = {
           settings,
           model: trimmedModel,
@@ -773,6 +784,10 @@ export default function ResponsesPage() {
 
         if (transportMode === 'http_stream') {
           return callResponsesImageApiStream(requestOptions)
+        }
+
+        if (nextPreviousResponseId) {
+          return callResponsesImageApiWebSocket(requestOptions)
         }
 
         try {
