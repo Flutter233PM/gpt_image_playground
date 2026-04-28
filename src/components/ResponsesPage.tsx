@@ -260,6 +260,7 @@ function sortConversations(conversations: StoredResponseConversation[]): StoredR
 function getLatestOutputImageDataUrls(messages: StoredResponseChatMessage[], limit = 1): string[] {
   for (let i = messages.length - 1; i >= 0; i--) {
     const images = messages[i].outputs
+      .filter((item) => !item.partial)
       .map((item) => item.image)
       .filter((value): value is string => Boolean(value))
 
@@ -267,6 +268,23 @@ function getLatestOutputImageDataUrls(messages: StoredResponseChatMessage[], lim
   }
 
   return []
+}
+
+function getVisibleResponseOutputs(result: CallResponsesImageApiResult): StoredResponseChatMessage['outputs'] {
+  return [...result.images, ...result.partialImages]
+}
+
+function getResponseOutputCaption(
+  outputs: StoredResponseChatMessage['outputs'],
+  item: StoredResponseChatMessage['outputs'][number],
+  index: number,
+): string {
+  const position = outputs
+    .slice(0, index + 1)
+    .filter((output) => Boolean(output.partial) === Boolean(item.partial))
+    .length
+
+  return `${item.partial ? '预览' : '图片'} ${position}`
 }
 
 function uniqueDataUrls(values: string[]): string[] {
@@ -749,6 +767,7 @@ export default function ResponsesPage() {
       const revisedPrompts = result.images
         .map((item) => item.revisedPrompt)
         .filter((value): value is string => Boolean(value))
+      const visibleOutputs = getVisibleResponseOutputs(result)
       const completedMessages = nextMessages.map((message) => (
         message.id === assistantId
           ? {
@@ -756,7 +775,7 @@ export default function ResponsesPage() {
               previousResponseId: usedPreviousResponseId,
               contextItemRefs: usedContextItemRefs,
               imageGenerationCallIds: usedImageGenerationCallIds,
-              outputs: result.images,
+              outputs: visibleOutputs,
               texts: result.texts,
               revisedPrompts,
               responseId: nextResponseId,
@@ -1039,7 +1058,7 @@ export default function ResponsesPage() {
                           <figure key={`${item.callId ?? 'image'}-${index}`} className="overflow-hidden rounded-lg border border-gray-200 bg-gray-50 dark:border-white/[0.08] dark:bg-gray-900">
                             <img src={item.image} alt={`生成结果 ${index + 1}`} className="aspect-square w-full object-contain" />
                             <figcaption className="flex items-center justify-between border-t border-gray-200 px-2 py-1.5 text-xs text-gray-500 dark:border-white/[0.08] dark:text-gray-400">
-                              <span>{item.partial ? '预览' : '图片'} {index + 1}</span>
+                              <span>{getResponseOutputCaption(message.outputs, item, index)}</span>
                               <a
                                 href={item.image}
                                 download={`responses-image-${index + 1}.${toolOptions.output_format}`}

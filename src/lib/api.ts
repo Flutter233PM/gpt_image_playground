@@ -79,6 +79,7 @@ export interface CallResponsesImageApiOptions {
 export interface CallResponsesImageApiResult {
   responseId?: string
   images: ResponsesImageOutput[]
+  partialImages: ResponsesImageOutput[]
   texts: ResponsesApiTextOutput[]
   transport: ResponsesActualTransport
 }
@@ -128,6 +129,7 @@ interface ResponsesStreamEvent {
   id?: string
   item_id?: string
   output_item_id?: string
+  partial_image?: string
   partial_image_b64?: string
   partial_image_index?: number
   response?: ResponsesApiResponse & {
@@ -309,6 +311,7 @@ function parseResponsesOutput(
   return {
     responseId: payload.id,
     images,
+    partialImages: [],
     texts,
     transport,
   }
@@ -377,11 +380,12 @@ function getPartialImageOutput(
   event: ResponsesStreamEvent,
   mime: string,
 ): ResponsesImageOutput | null {
-  if (!event.partial_image_b64) return null
+  const partialImage = event.partial_image_b64 || event.partial_image
+  if (!partialImage) return null
 
   const callId = event.item_id?.trim() || event.output_item_id?.trim() || event.id?.trim()
   return {
-    image: normalizeBase64Image(event.partial_image_b64, mime),
+    image: normalizeBase64Image(partialImage, mime),
     callId,
     partial: true,
     partialIndex: readPartialImageIndex(event.partial_image_index),
@@ -391,8 +395,11 @@ function getPartialImageOutput(
 function upsertImageOutput(images: ResponsesImageOutput[], nextImage: ResponsesImageOutput): ResponsesImageOutput[] {
   const next = [...images]
   const existingIndex = next.findIndex((image) => {
+    if (nextImage.partial || image.partial) {
+      if (nextImage.partialIndex != null && image.partialIndex === nextImage.partialIndex) return true
+      return image.image === nextImage.image
+    }
     if (nextImage.callId && image.callId === nextImage.callId) return true
-    if (nextImage.partialIndex != null && image.partialIndex === nextImage.partialIndex) return true
     return image.image === nextImage.image
   })
 
@@ -426,7 +433,7 @@ function createResponsesStreamCollector(
 
   const finish = (payload?: ResponsesApiResponse): CallResponsesImageApiResult => {
     const parsed = payload ? parseResponsesOutput(payload, mime, transport) : undefined
-    const finalImages = parsed?.images.length ? parsed.images : images.length ? images : partialImages
+    const finalImages = parsed?.images.length ? parsed.images : images
     const finalTexts = parsed?.texts.length ? parsed.texts : texts
     const bufferedText = textBuffer.trim()
 
@@ -434,13 +441,14 @@ function createResponsesStreamCollector(
       finalTexts.push({ text: bufferedText })
     }
 
-    if (!finalImages.length && !finalTexts.length) {
+    if (!finalImages.length && !partialImages.length && !finalTexts.length) {
       throw new Error('Responses HTTP 流式请求未返回可显示内容')
     }
 
     const result = {
       responseId: parsed?.responseId || responseId || undefined,
       images: finalImages.map((image) => ({ ...image, partial: false })),
+      partialImages,
       texts: finalTexts,
       transport,
     }

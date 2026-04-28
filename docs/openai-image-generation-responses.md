@@ -125,6 +125,11 @@ const stream = await client.responses.create({
 
 The `partial_images` option accepts `0` through `3` partial images. A request may receive fewer partial images than requested if the final image completes quickly. In streamed Responses API output, partial image events use the `response.image_generation_call.partial_image` event type.
 
+In the playground UI, partial images are displayed as `预览` outputs and kept
+beside the final `图片` output after the request completes. Only final images
+are synchronized back to the Image API history and used as the default visual
+context for the next turn.
+
 ## Revised Prompts
 
 When using image generation through the Responses API, the mainline model may revise the prompt for better image generation. The revised prompt is available on the `image_generation_call` object through `revised_prompt`.
