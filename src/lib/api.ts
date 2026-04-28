@@ -396,7 +396,6 @@ function upsertImageOutput(images: ResponsesImageOutput[], nextImage: ResponsesI
   const next = [...images]
   const existingIndex = next.findIndex((image) => {
     if (nextImage.partial || image.partial) {
-      if (nextImage.partialIndex != null && image.partialIndex === nextImage.partialIndex) return true
       return image.image === nextImage.image
     }
     if (nextImage.callId && image.callId === nextImage.callId) return true
@@ -413,6 +412,23 @@ function upsertImageOutput(images: ResponsesImageOutput[], nextImage: ResponsesI
 
   next.push(nextImage)
   return next
+}
+
+function isPartialImageStreamEvent(event: ResponsesStreamEvent): boolean {
+  return event.type === 'response.image_generation_call.partial_image'
+    || event.type === 'image_generation.partial_image'
+    || event.type === 'image_edit.partial_image'
+}
+
+function waitForNextFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+      window.requestAnimationFrame(() => resolve())
+      return
+    }
+
+    setTimeout(resolve, 0)
+  })
 }
 
 function createResponsesStreamCollector(
@@ -722,6 +738,9 @@ export async function callResponsesImageApiStream(
         if (event) {
           const result = collector.handleEvent(event)
           if (result) return result
+          if (isPartialImageStreamEvent(event)) {
+            await waitForNextFrame()
+          }
         }
         separator = buffer.match(/\r?\n\r?\n/)
       }
@@ -734,6 +753,9 @@ export async function callResponsesImageApiStream(
       if (event) {
         const result = collector.handleEvent(event)
         if (result) return result
+        if (isPartialImageStreamEvent(event)) {
+          await waitForNextFrame()
+        }
       }
     }
 

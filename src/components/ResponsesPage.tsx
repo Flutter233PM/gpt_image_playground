@@ -156,7 +156,7 @@ function getProgressText(event: ResponsesImageApiProgressEvent): string {
     case 'text':
       return `${transport} 正在返回文本`
     case 'partial_image':
-      return `${transport} 收到预览图`
+      return `${transport} 收到 ${event.images?.length ?? 1} 张预览图`
     case 'output_item':
       return `${transport} 收到输出项`
     case 'fallback':

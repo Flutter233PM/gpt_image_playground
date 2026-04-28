@@ -128,7 +128,10 @@ The `partial_images` option accepts `0` through `3` partial images. A request ma
 In the playground UI, partial images are displayed as `预览` outputs and kept
 beside the final `图片` output after the request completes. Only final images
 are synchronized back to the Image API history and used as the default visual
-context for the next turn.
+context for the next turn. During HTTP streaming, the UI renders each preview
+after its SSE event is parsed. If every preview appears only with the final
+image, the upstream server or reverse proxy is likely buffering the SSE stream
+until completion.
 
 ## Revised Prompts
 
