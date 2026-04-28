@@ -97,6 +97,19 @@ The image tool supports an optional `action` value:
 
 If `action: "edit"` is used without an image in context, the request can fail. Prefer `auto` unless the app can guarantee the context contains an editable image.
 
+### Playground continuation policy
+
+The official API supports `previous_response_id` and `image_generation_call`
+item references, but this playground should not rely on those identifiers in a
+browser-to-sub2api deployment where upstream storage may be disabled.
+
+The app still saves each returned `response.id` in local IndexedDB for history
+and diagnostics. For the next turn, it sends the latest generated image from
+local history back as an `input_image` data URL, optionally with a compact
+transcript prompt. This keeps the local conversation UI unchanged while avoiding
+non-persisted `ig_...` item references and deployment-specific WebSocket v2
+continuation requirements.
+
 ## Streaming
 
 Both Responses API image generation and Image API generation support streaming. For Responses API, set:

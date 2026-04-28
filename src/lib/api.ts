@@ -3,7 +3,6 @@ import type {
   ImageApiResponse,
   ResponsesApiTextOutput,
   ResponsesActualTransport,
-  ResponsesContextItemRef,
   ResponsesImageOutput,
   ResponsesImageToolOptions,
   ResponsesReasoningContextItemRef,
@@ -71,8 +70,6 @@ export interface CallResponsesImageApiOptions {
   settings: AppSettings
   model: string
   prompt: string
-  previousResponseId?: string
-  contextItemRefs?: ResponsesContextItemRef[]
   reasoningEffort: ResponsesReasoningEffort
   toolOptions: ResponsesImageToolOptions
   inputImageDataUrls: string[]
@@ -126,7 +123,7 @@ interface ResponsesOutputParseState {
   latestReasoning?: ResponsesReasoningContextItemRef
 }
 
-interface ResponsesWebSocketEvent {
+interface ResponsesStreamEvent {
   type?: string
   id?: string
   item_id?: string
@@ -149,10 +146,6 @@ interface ResponsesWebSocketEvent {
   text?: string
 }
 
-const WEBSOCKET_PROTOCOL_TOKEN_RE = /^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/
-const SUB2API_WS_API_KEY_PROTOCOL_PREFIX = 'sub2api-api-key.'
-const RESPONSES_WS_ABNORMAL_CLOSE_CODE = 1006
-const RESPONSES_IMAGE_INCLUDE = ['reasoning.encrypted_content']
 const RESPONSES_IMAGE_INSTRUCTIONS = [
   'You are an image generation assistant.',
   'Follow the latest user request and use prior response context when provided.',
@@ -208,24 +201,6 @@ async function readImageApiImages(response: Response, mime: string, signal: Abor
   return images
 }
 
-function buildWebSocketApiUrl(baseUrl: string, path: string, proxyConfig?: ReturnType<typeof readClientDevProxyConfig>): string {
-  const apiUrl = buildApiUrl(baseUrl, path, proxyConfig)
-  const url = new URL(apiUrl, window.location.href)
-  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
-  return url.toString()
-}
-
-function buildSub2ApiWebSocketProtocols(apiKey: string): string[] {
-  const trimmedApiKey = apiKey.trim()
-  const authProtocol = `${SUB2API_WS_API_KEY_PROTOCOL_PREFIX}${trimmedApiKey}`
-
-  if (!WEBSOCKET_PROTOCOL_TOKEN_RE.test(authProtocol)) {
-    throw new Error('当前 API Key 包含 WebSocket subprotocol 不支持的字符，无法使用 sub2api WS v2 代理')
-  }
-
-  return ['sub2api.responses.v2', authProtocol]
-}
-
 function normalizeRecordArray(value: unknown): Array<Record<string, unknown>> {
   if (!Array.isArray(value)) return []
 
@@ -234,7 +209,7 @@ function normalizeRecordArray(value: unknown): Array<Record<string, unknown>> {
   ))
 }
 
-function normalizeReasoningContextItem(item: ResponsesApiOutputItem | ResponsesContextItemRef): ResponsesReasoningContextItemRef | null {
+function normalizeReasoningContextItem(item: ResponsesApiOutputItem): ResponsesReasoningContextItemRef | null {
   if (item.type !== 'reasoning') return null
 
   const id = item.id?.trim()
@@ -262,58 +237,6 @@ function normalizeReasoningContextItem(item: ResponsesApiOutputItem | ResponsesC
   return ref
 }
 
-function normalizeResponsesContextItemRefs(contextItemRefs: ResponsesContextItemRef[] | undefined): ResponsesContextItemRef[] {
-  const refs: ResponsesContextItemRef[] = []
-  const seen = new Set<string>()
-
-  for (const item of contextItemRefs ?? []) {
-    const type = item.type
-
-    if (type === 'reasoning') {
-      const reasoning = normalizeReasoningContextItem(item)
-      if (!reasoning) continue
-
-      const key = `${reasoning.type}:${reasoning.id}`
-      if (seen.has(key)) continue
-
-      seen.add(key)
-      refs.push(reasoning)
-      continue
-    }
-
-    if (type !== 'image_generation_call') continue
-
-    const id = item.id.trim()
-    if (!id) continue
-
-    const key = `${type}:${id}`
-    if (seen.has(key)) continue
-
-    seen.add(key)
-    refs.push({ type, id })
-  }
-
-  return refs
-}
-
-function buildResponsesContextInputItem(item: ResponsesContextItemRef): Record<string, unknown> {
-  if (item.type === 'reasoning') {
-    const inputItem: Record<string, unknown> = {
-      type: 'reasoning',
-      id: item.id,
-      summary: item.summary ?? [],
-    }
-
-    if (item.encrypted_content) inputItem.encrypted_content = item.encrypted_content
-    if (item.content?.length) inputItem.content = item.content
-    if (item.status) inputItem.status = item.status
-
-    return inputItem
-  }
-
-  return { type: 'image_generation_call', id: item.id }
-}
-
 function buildResponsesImagePayload(
   opts: CallResponsesImageApiOptions,
   enablePartialImages = false,
@@ -321,8 +244,6 @@ function buildResponsesImagePayload(
   const {
     model,
     prompt,
-    previousResponseId,
-    contextItemRefs,
     reasoningEffort,
     toolOptions,
     inputImageDataUrls,
@@ -353,25 +274,18 @@ function buildResponsesImagePayload(
     content.push({ type: 'input_image', image_url: dataUrl })
   }
 
-  const input: Array<Record<string, unknown>> = normalizeResponsesContextItemRefs(contextItemRefs)
-    .map(buildResponsesContextInputItem)
-  input.push({
+  const input: Array<Record<string, unknown>> = [{
     role: 'user',
     content,
-  })
+  }]
 
   const body: Record<string, unknown> = {
     model: model.trim(),
     instructions: RESPONSES_IMAGE_INSTRUCTIONS,
     input,
-    include: RESPONSES_IMAGE_INCLUDE,
     tools: [tool],
   }
 
-  const trimmedPreviousResponseId = previousResponseId?.trim()
-  if (trimmedPreviousResponseId) {
-    body.previous_response_id = trimmedPreviousResponseId
-  }
   if (reasoningEffort !== 'default') {
     body.reasoning = { effort: reasoningEffort }
   }
@@ -447,20 +361,11 @@ function collectResponsesOutputItem(
   }
 }
 
-function readResponsesWebSocketError(event: ResponsesWebSocketEvent): string {
+function readResponsesStreamError(event: ResponsesStreamEvent): string {
   return event.error?.message
     || event.response?.error?.message
     || event.response?.incomplete_details?.reason
-    || 'Responses WebSocket 请求失败'
-}
-
-function readResponsesWebSocketCloseError(event: CloseEvent): string {
-  if (event.code === RESPONSES_WS_ABNORMAL_CLOSE_CODE) {
-    return 'Responses WebSocket 异常断开（1006）：代理或上游在长时间生成时关闭了连接，请检查 API_PROXY_TIMEOUT、Caddy/Nginx WebSocket 代理和 sub2api 日志'
-  }
-
-  const reason = event.reason ? `：${event.reason}` : ''
-  return `Responses WebSocket 已关闭（${event.code}）${reason}`
+    || 'Responses HTTP 流式请求失败'
 }
 
 function readPartialImageIndex(value: unknown): number | undefined {
@@ -469,7 +374,7 @@ function readPartialImageIndex(value: unknown): number | undefined {
 }
 
 function getPartialImageOutput(
-  event: ResponsesWebSocketEvent,
+  event: ResponsesStreamEvent,
   mime: string,
 ): ResponsesImageOutput | null {
   if (!event.partial_image_b64) return null
@@ -530,9 +435,7 @@ function createResponsesStreamCollector(
     }
 
     if (!finalImages.length && !finalTexts.length) {
-      throw new Error(transport === 'websocket'
-        ? 'Responses WebSocket 未返回可显示内容'
-        : 'Responses HTTP 流式请求未返回可显示内容')
+      throw new Error('Responses HTTP 流式请求未返回可显示内容')
     }
 
     const result = {
@@ -545,7 +448,7 @@ function createResponsesStreamCollector(
     return result
   }
 
-  const handleEvent = (event: ResponsesWebSocketEvent): CallResponsesImageApiResult | null => {
+  const handleEvent = (event: ResponsesStreamEvent): CallResponsesImageApiResult | null => {
     const eventResponseId = event.response?.id || event.id
     if (eventResponseId) responseId = eventResponseId
 
@@ -591,7 +494,7 @@ function createResponsesStreamCollector(
       case 'response.failed':
       case 'response.incomplete':
       case 'error':
-        throw new Error(readResponsesWebSocketError(event))
+        throw new Error(readResponsesStreamError(event))
       default:
         if (event.item) {
           collectResponsesOutputItem(event.item, mime, images, texts, outputState)
@@ -604,11 +507,10 @@ function createResponsesStreamCollector(
   return {
     handleEvent,
     finish,
-    hasBufferedContent: () => images.length > 0 || texts.length > 0 || partialImages.length > 0 || textBuffer.trim(),
   }
 }
 
-function parseSseBlock(block: string): ResponsesWebSocketEvent | null {
+function parseSseBlock(block: string): ResponsesStreamEvent | null {
   const data = block
     .split(/\r?\n/)
     .filter((line) => line.startsWith('data:'))
@@ -617,7 +519,7 @@ function parseSseBlock(block: string): ResponsesWebSocketEvent | null {
     .trim()
 
   if (!data || data === '[DONE]') return null
-  return JSON.parse(data) as ResponsesWebSocketEvent
+  return JSON.parse(data) as ResponsesStreamEvent
 }
 
 export async function callImageApi(opts: CallApiOptions): Promise<CallApiResult> {
@@ -831,113 +733,4 @@ export async function callResponsesImageApiStream(
   } finally {
     clearTimeout(timeoutId)
   }
-}
-
-export async function callResponsesImageApiWebSocket(
-  opts: CallResponsesImageApiOptions,
-): Promise<CallResponsesImageApiResult> {
-  const { settings } = opts
-  const proxyConfig = readClientDevProxyConfig()
-  const wsUrl = buildWebSocketApiUrl(settings.baseUrl, 'responses', proxyConfig)
-  const parsedWsUrl = new URL(wsUrl)
-
-  if (parsedWsUrl.origin !== window.location.origin.replace(/^http/, 'ws')) {
-    throw new Error('Responses WebSocket v2 需要使用同源 /v1/ 代理；请将 API URL 设为 same-origin 并配置 API_PROXY_URL')
-  }
-
-  const { body, mime } = buildResponsesImagePayload(opts, true)
-  const wsPayload = {
-    type: 'response.create',
-    ...body,
-    stream: true,
-  }
-  const collector = createResponsesStreamCollector(mime, 'websocket', opts.onProgress)
-
-  return new Promise((resolve, reject) => {
-    let settled = false
-    const timeoutId = window.setTimeout(() => {
-      rejectOnce(new Error(`Responses WebSocket 请求超时（${settings.timeout}s）`))
-      try {
-        ws.close(1000, 'timeout')
-      } catch {
-        /* ignore */
-      }
-    }, settings.timeout * 1000)
-
-    let ws: WebSocket
-    try {
-      ws = new WebSocket(wsUrl, buildSub2ApiWebSocketProtocols(settings.apiKey))
-    } catch (err) {
-      window.clearTimeout(timeoutId)
-      reject(err)
-      return
-    }
-
-    const rejectOnce = (err: Error) => {
-      if (settled) return
-      settled = true
-      window.clearTimeout(timeoutId)
-      reject(err)
-    }
-
-    const resolveOnce = (result: CallResponsesImageApiResult) => {
-      if (settled) return
-      settled = true
-      window.clearTimeout(timeoutId)
-      resolve(result)
-      try {
-        ws.close(1000, 'complete')
-      } catch {
-        /* ignore */
-      }
-    }
-
-    const handleEvent = (event: ResponsesWebSocketEvent) => {
-      try {
-        const result = collector.handleEvent(event)
-        if (result) resolveOnce(result)
-      } catch (err) {
-        rejectOnce(err instanceof Error ? err : new Error(String(err)))
-      }
-    }
-
-    ws.onopen = () => {
-      opts.onProgress?.({ transport: 'websocket', phase: 'connecting', message: '正在建立 WebSocket 连接' })
-      ws.send(JSON.stringify(wsPayload))
-    }
-
-    ws.onmessage = async (messageEvent) => {
-      try {
-        const raw = typeof messageEvent.data === 'string'
-          ? messageEvent.data
-          : messageEvent.data instanceof Blob
-            ? await messageEvent.data.text()
-            : new TextDecoder().decode(messageEvent.data)
-        handleEvent(JSON.parse(raw) as ResponsesWebSocketEvent)
-      } catch (err) {
-        rejectOnce(err instanceof Error ? err : new Error(String(err)))
-      }
-    }
-
-    ws.onerror = () => {
-      rejectOnce(new Error('Responses WebSocket 连接失败'))
-    }
-
-    ws.onclose = (event) => {
-      if (settled) return
-      if (
-        event.code === RESPONSES_WS_ABNORMAL_CLOSE_CODE
-        && collector.hasBufferedContent()
-      ) {
-        try {
-          resolveOnce(collector.finish())
-        } catch (err) {
-          rejectOnce(err instanceof Error ? err : new Error(String(err)))
-        }
-        return
-      }
-
-      rejectOnce(new Error(readResponsesWebSocketCloseError(event)))
-    }
-  })
 }

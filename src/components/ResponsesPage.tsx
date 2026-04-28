@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type {
-  ResponsesContextItemRef,
   ResponsesContextMode,
   ResponsesImageToolOptions,
   ResponsesReasoningEffort,
@@ -11,7 +10,7 @@ import type {
   TaskRecord,
 } from '../types'
 import { DEFAULT_PARAMS } from '../types'
-import { callResponsesImageApi, callResponsesImageApiStream, callResponsesImageApiWebSocket } from '../lib/api'
+import { callResponsesImageApi, callResponsesImageApiStream } from '../lib/api'
 import type { CallResponsesImageApiResult, ResponsesImageApiProgressEvent } from '../lib/api'
 import {
   deleteResponseConversation,
@@ -75,14 +74,12 @@ const REASONING_OPTIONS = [
 const CONTEXT_MODE_OPTIONS = [
   { label: '不发送上下文', value: 'off' },
   { label: '自动混合', value: 'auto' },
-  { label: '图片上下文接续', value: 'image_generation_call' },
-  { label: '响应 ID 接续', value: 'previous_response_id' },
+  { label: '上一张图接续', value: 'local_image' },
 ]
 
 const TRANSPORT_MODE_OPTIONS = [
   { label: '自动：HTTP 流式优先', value: 'auto' },
   { label: 'HTTP 流式', value: 'http_stream' },
-  { label: 'WebSocket v2', value: 'websocket' },
   { label: 'HTTP JSON', value: 'http_json' },
 ]
 
@@ -101,18 +98,6 @@ interface ResponsesErrorDisplay {
 
 interface PersistConversationOptions {
   activate?: boolean
-}
-
-function isContinuationUnavailableError(message: string): boolean {
-  const normalized = message.toLowerCase()
-  return (
-    normalized.includes('upstream continuation connection is unavailable')
-    || normalized.includes('please restart the conversation')
-    || normalized.includes('previous_response_id is only supported on responses websocket v2')
-    || normalized.includes('responses websocket 连接失败')
-    || normalized.includes('responses websocket 已关闭')
-    || normalized.includes('responses websocket 异常断开')
-  )
 }
 
 function isHttpStreamRetryableError(message: string): boolean {
@@ -151,8 +136,6 @@ function getTransportLabel(transport: ResponsesTransportMode | CallResponsesImag
   switch (transport) {
     case 'http_stream':
       return 'HTTP 流式'
-    case 'websocket':
-      return 'WebSocket v2'
     case 'http_json':
       return 'HTTP JSON'
     default:
@@ -274,58 +257,29 @@ function sortConversations(conversations: StoredResponseConversation[]): StoredR
   return [...conversations].sort((a, b) => b.updatedAt - a.updatedAt)
 }
 
-function uniqueContextItemRefs(items: ResponsesContextItemRef[]): ResponsesContextItemRef[] {
-  const refs: ResponsesContextItemRef[] = []
-  const seen = new Set<string>()
-
-  for (const item of items) {
-    const id = item.id.trim()
-    if (!id) continue
-
-    const key = `${item.type}:${id}`
-    if (seen.has(key)) continue
-
-    seen.add(key)
-    if (item.type === 'reasoning') {
-      refs.push({ ...item, id })
-    } else {
-      refs.push({ type: 'image_generation_call', id })
-    }
-  }
-
-  return refs
-}
-
-function getImageGenerationCallIdsFromContextRefs(items: ResponsesContextItemRef[]): string[] {
-  return items
-    .filter((item) => item.type === 'image_generation_call')
-    .map((item) => item.id)
-}
-
-function formatContextItemRef(item: ResponsesContextItemRef): string {
-  return `${item.type === 'reasoning' ? 'reasoning' : 'image_generation_call'}: ${item.id}`
-}
-
-function getLatestImageContextItemRefs(messages: StoredResponseChatMessage[]): ResponsesContextItemRef[] {
+function getLatestOutputImageDataUrls(messages: StoredResponseChatMessage[], limit = 1): string[] {
   for (let i = messages.length - 1; i >= 0; i--) {
-    const refs: ResponsesContextItemRef[] = []
+    const images = messages[i].outputs
+      .map((item) => item.image)
+      .filter((value): value is string => Boolean(value))
 
-    for (const item of messages[i].outputs) {
-      const reasoning = item.reasoning
-      const callId = item.callId?.trim()
-
-      if (!reasoning?.id?.trim() || !callId) continue
-
-      refs.push(
-        reasoning,
-        { type: 'image_generation_call', id: callId },
-      )
-    }
-
-    if (refs.length) return uniqueContextItemRefs(refs)
+    if (images.length) return images.slice(0, limit)
   }
 
   return []
+}
+
+function uniqueDataUrls(values: string[]): string[] {
+  const next: string[] = []
+  const seen = new Set<string>()
+
+  for (const value of values) {
+    if (!value || seen.has(value)) continue
+    seen.add(value)
+    next.push(value)
+  }
+
+  return next
 }
 
 function buildContinuationFallbackPrompt(messages: StoredResponseChatMessage[], currentPrompt: string): string {
@@ -418,15 +372,15 @@ export default function ResponsesPage() {
   const canUseCompression = toolOptions.output_format !== 'png'
   const compressionValue = toolOptions.output_compression ?? 80
   const currentSize = normalizeImageSize(toolOptions.size) || 'auto'
-  const latestImageContextItemRefs = useMemo(() => getLatestImageContextItemRefs(messages), [messages])
-  const hasLatestImageContext = latestImageContextItemRefs.length > 0
-  const shouldSendImageContext = (
-    contextMode === 'image_generation_call'
-    || (contextMode === 'auto' && !conversationResponseId && hasLatestImageContext)
+  const latestOutputImageDataUrls = useMemo(() => getLatestOutputImageDataUrls(messages), [messages])
+  const hasLatestImageContext = latestOutputImageDataUrls.length > 0
+  const hasLocalTranscriptContext = useMemo(
+    () => messages.some((message) => message.role === 'user' && message.text.trim()),
+    [messages],
   )
-  const shouldSendPreviousResponseId = (
-    contextMode === 'previous_response_id'
-    || (contextMode === 'auto' && Boolean(conversationResponseId))
+  const shouldSendImageContext = (
+    contextMode === 'local_image'
+    || (contextMode === 'auto' && hasLatestImageContext && !referenceImages.length)
   )
   const runningConversationCount = runningConversationIds.size
   const isRunning = runningConversationCount > 0
@@ -437,34 +391,36 @@ export default function ResponsesPage() {
   const statusText = useMemo(() => {
     if (isActiveConversationRunning) return '请求中'
     if (runningConversationCount > 0) return `${runningConversationCount} 个后台生成中`
-    if (shouldSendPreviousResponseId && conversationResponseId) return '响应 ID 接续'
     if (shouldSendImageContext) return hasLatestImageContext ? '图片上下文接续' : '无可用图片上下文'
+    if (contextMode !== 'off' && hasLocalTranscriptContext) return '本地对话接续'
     if (conversationResponseId) return '未发送上下文'
     return `${getTransportLabel(transportMode)} 新对话`
   }, [
     conversationResponseId,
+    contextMode,
     hasLatestImageContext,
+    hasLocalTranscriptContext,
     isActiveConversationRunning,
     runningConversationCount,
     shouldSendImageContext,
-    shouldSendPreviousResponseId,
     transportMode,
   ])
   const contextPreviewText = useMemo(() => {
-    if (shouldSendPreviousResponseId) {
-      return conversationResponseId || '下一条从新对话开始'
-    }
     if (shouldSendImageContext) {
-      return latestImageContextItemRefs.map(formatContextItemRef).join('\n')
-        || '暂无 reasoning + image_generation_call 配对，下一条从新对话开始'
+      return hasLatestImageContext
+        ? '上一张生成图 data URL + 本地对话摘要'
+        : '暂无上一张生成图，下一条仅发送当前输入'
+    }
+    if (contextMode !== 'off' && hasLocalTranscriptContext) {
+      return '本地对话摘要'
     }
 
     return '本次不发送'
   }, [
-    conversationResponseId,
-    latestImageContextItemRefs,
+    contextMode,
+    hasLatestImageContext,
+    hasLocalTranscriptContext,
     shouldSendImageContext,
-    shouldSendPreviousResponseId,
   ])
 
   useEffect(() => {
@@ -653,16 +609,16 @@ export default function ResponsesPage() {
       return
     }
 
-    const fallbackImageContextItemRefs = getLatestImageContextItemRefs(messages)
-    const contextItemRefs = shouldSendImageContext ? fallbackImageContextItemRefs : []
-    const imageGenerationCallIds = getImageGenerationCallIdsFromContextRefs(contextItemRefs)
-    const previousResponseId = shouldSendPreviousResponseId ? conversationResponseId : ''
+    const localContextImageDataUrls = shouldSendImageContext ? latestOutputImageDataUrls : []
+    const contextItemRefs: NonNullable<StoredResponseChatMessage['contextItemRefs']> = []
+    const imageGenerationCallIds: string[] = []
+    const previousResponseId = ''
 
     if (
       toolOptions.action === 'edit'
       && !inputImages.length
       && !previousResponseId
-      && !contextItemRefs.length
+      && !localContextImageDataUrls.length
     ) {
       showToast('编辑模式需要参考图或已有对话上下文', 'error')
       return
@@ -701,12 +657,8 @@ export default function ResponsesPage() {
       previousResponseId,
       contextItemRefs,
       imageGenerationCallIds,
-      transport: transportMode === 'websocket'
-        ? 'websocket'
-        : transportMode === 'http_json'
-          ? 'http_json'
-          : 'http_stream',
-      progress: `${getTransportLabel(transportMode)} 等待响应`,
+      transport: transportMode === 'http_json' ? 'http_json' : 'http_stream',
+      progress: `${getTransportLabel(transportMode === 'http_json' ? 'http_json' : 'http_stream')} 等待响应`,
       status: 'running',
       createdAt: startedAt,
     }
@@ -716,16 +668,20 @@ export default function ResponsesPage() {
     setPrompt('')
     setReferenceImages([])
     markConversationRunning(conversationId)
-    persistConversation(conversationId, nextMessages, previousResponseId, trimmedPrompt)
+    persistConversation(conversationId, nextMessages, conversationResponseId, trimmedPrompt)
     scrollToBottom()
 
     try {
       const inputImageDataUrls = inputImages.map((image) => image.dataUrl)
-      let usedPreviousResponseId = previousResponseId
-      let usedContextItemRefs = contextItemRefs
-      let usedImageGenerationCallIds = imageGenerationCallIds
-      let retriedWithTranscriptContext = false
-      let retriedWithImageContext = false
+      const requestImageDataUrls = uniqueDataUrls([...inputImageDataUrls, ...localContextImageDataUrls])
+      const requestPrompt = contextMode === 'off'
+        ? trimmedPrompt
+        : buildContinuationFallbackPrompt(messages, trimmedPrompt)
+      const usedPreviousResponseId = previousResponseId
+      const usedContextItemRefs = contextItemRefs
+      const usedImageGenerationCallIds = imageGenerationCallIds
+      const usedTranscriptContext = requestPrompt !== trimmedPrompt
+      const usedImageContext = localContextImageDataUrls.length > 0
       let retriedWithTransportFallback = false
       let result: CallResponsesImageApiResult
 
@@ -750,32 +706,15 @@ export default function ResponsesPage() {
         }
       }
 
-      const callWithTransport = async (
-        nextPrompt: string,
-        nextPreviousResponseId: string,
-        nextContextItemRefs: ResponsesContextItemRef[],
-      ) => {
-        if (
-          nextPreviousResponseId
-          && (transportMode === 'http_stream' || transportMode === 'http_json')
-        ) {
-          throw new Error('previous_response_id is only supported on Responses WebSocket v2')
-        }
-
+      const callWithTransport = async () => {
         const requestOptions = {
           settings,
           model: trimmedModel,
-          prompt: nextPrompt,
-          previousResponseId: nextPreviousResponseId,
-          contextItemRefs: nextContextItemRefs,
+          prompt: requestPrompt,
           reasoningEffort,
           toolOptions,
-          inputImageDataUrls,
+          inputImageDataUrls: requestImageDataUrls,
           onProgress: updateAssistantProgress,
-        }
-
-        if (transportMode === 'websocket') {
-          return callResponsesImageApiWebSocket(requestOptions)
         }
 
         if (transportMode === 'http_json') {
@@ -786,15 +725,11 @@ export default function ResponsesPage() {
           return callResponsesImageApiStream(requestOptions)
         }
 
-        if (nextPreviousResponseId) {
-          return callResponsesImageApiWebSocket(requestOptions)
-        }
-
         try {
           return await callResponsesImageApiStream(requestOptions)
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
-          if (isContinuationUnavailableError(message) || !isHttpStreamRetryableError(message)) {
+          if (!isHttpStreamRetryableError(message)) {
             throw err
           }
 
@@ -808,31 +743,7 @@ export default function ResponsesPage() {
         }
       }
 
-      try {
-        result = await callWithTransport(trimmedPrompt, previousResponseId, contextItemRefs)
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err)
-        const canRetryWithoutContext = toolOptions.action !== 'edit' || inputImages.length > 0
-        if (!previousResponseId || !isContinuationUnavailableError(message)) {
-          throw err
-        } else if (fallbackImageContextItemRefs.length) {
-          const fallbackPrompt = buildContinuationFallbackPrompt(messages, trimmedPrompt)
-          usedPreviousResponseId = ''
-          usedContextItemRefs = fallbackImageContextItemRefs
-          usedImageGenerationCallIds = getImageGenerationCallIdsFromContextRefs(fallbackImageContextItemRefs)
-          retriedWithImageContext = true
-          result = await callWithTransport(fallbackPrompt, '', fallbackImageContextItemRefs)
-        } else if (!canRetryWithoutContext) {
-          throw err
-        } else {
-          const fallbackPrompt = buildContinuationFallbackPrompt(messages, trimmedPrompt)
-          usedPreviousResponseId = ''
-          usedContextItemRefs = []
-          usedImageGenerationCallIds = []
-          retriedWithTranscriptContext = fallbackPrompt !== trimmedPrompt
-          result = await callWithTransport(fallbackPrompt, '', [])
-        }
-      }
+      result = await callWithTransport()
 
       const nextResponseId = result.responseId ?? ''
       const revisedPrompts = result.images
@@ -893,10 +804,10 @@ export default function ResponsesPage() {
           ? `Responses API 返回 ${result.images.length} 张图片${syncedToImageApi ? '，已同步到 Image API' : imageApiSyncFailed ? '，同步到 Image API 失败' : ''}`
           : retriedWithTransportFallback
             ? 'HTTP 流式不可用，已用 HTTP JSON 完成'
-          : retriedWithImageContext
-            ? '响应 ID 接续失败，已用图片上下文接续完成'
-          : retriedWithTranscriptContext
-            ? '响应 ID 接续失败，已用本地对话转述完成'
+          : usedImageContext
+            ? '已用上一张图作为参考图完成'
+          : usedTranscriptContext
+            ? '已用本地对话转述完成'
           : 'Responses API 返回文本内容',
         imageApiSyncFailed ? 'error' : 'success',
       )
@@ -912,7 +823,7 @@ export default function ResponsesPage() {
             }
           : item
       ))
-      persistConversation(conversationId, failedMessages, previousResponseId, trimmedPrompt, { activate: false })
+      persistConversation(conversationId, failedMessages, conversationResponseId, trimmedPrompt, { activate: false })
       showToast(`生成失败：${getResponsesErrorDisplay(message).summary}`, 'error')
     } finally {
       markConversationSettled(conversationId)
@@ -1054,7 +965,7 @@ export default function ResponsesPage() {
                 Responses 对话生图
               </h2>
               <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
-                走 /v1/responses，保存 response.id 后用 previous_response_id 接续。
+                走 /v1/responses，保存 response.id 到本地历史，续轮使用本地图片上下文。
               </p>
             </div>
             <span className="hidden rounded-lg border border-gray-200 px-2 py-1 text-xs text-gray-500 dark:border-white/[0.08] dark:text-gray-400 sm:inline">
@@ -1294,7 +1205,7 @@ export default function ResponsesPage() {
           <div>
             <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">请求参数</h3>
             <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              自动上下文优先使用响应 ID；自动传输优先使用 HTTP 流式。
+              自动上下文优先使用本地输出图；自动传输优先使用 HTTP 流式。
             </p>
           </div>
 

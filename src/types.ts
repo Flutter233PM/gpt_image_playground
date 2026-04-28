@@ -121,9 +121,9 @@ export interface ImageApiResponse {
 // ===== Responses API 图片生成 =====
 
 export type ResponsesImageAction = 'auto' | 'generate' | 'edit'
-export type ResponsesContextMode = 'off' | 'auto' | 'previous_response_id' | 'image_generation_call'
-export type ResponsesTransportMode = 'auto' | 'http_stream' | 'websocket' | 'http_json'
-export type ResponsesActualTransport = 'http_stream' | 'websocket' | 'http_json'
+export type ResponsesContextMode = 'off' | 'auto' | 'local_image'
+export type ResponsesTransportMode = 'auto' | 'http_stream' | 'http_json'
+export type ResponsesActualTransport = 'http_stream' | 'http_json'
 export type ResponsesReasoningEffort = 'default' | 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
 
 export interface ResponsesReasoningContextItemRef {
